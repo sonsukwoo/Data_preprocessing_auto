@@ -1,0 +1,22 @@
+.DS_Store
+.vscode/
+DOCKER.md
+AGENTS.md
+
+# Secrets / local config
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+backend/.venv/
+
+# Runtime outputs (ephemeral)
+backend/outputs/
+

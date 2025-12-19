@@ -1,0 +1,8 @@
+services:
+  # Dev convenience: mount local static files so UI changes reflect on refresh without rebuilding images.
+  front:
+    volumes:
+      - ./front/index.html:/usr/share/nginx/html/index.html:ro
+      - ./front/style.css:/usr/share/nginx/html/style.css:ro
+      - ./front/script.js:/usr/share/nginx/html/script.js:ro
+      - ./front/nginx.conf:/etc/nginx/conf.d/default.conf:ro
