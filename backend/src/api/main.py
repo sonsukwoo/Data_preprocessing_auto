@@ -22,7 +22,7 @@ from starlette.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from data_preprocessing.config import ensure_api_keys
-from data_preprocessing.workflow import build_graph, run_request
+from data_preprocessing.workflow import build_graph, run_request, write_internal_trace_markdown
 
 # 디렉터리 경로 정의
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -699,6 +699,7 @@ def run_stream(body: RunRequest) -> StreamingResponse:
             "user_request": rewritten_question,
             "output_formats": output_formats,
             "final_user_messages": None,
+            "trace": [],
         }
 
         last_iterations = 0
@@ -743,11 +744,11 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                                         last_msg = str(m)
 
                             if prev_phase == "executing" or "failed during execution" in last_msg.lower():
-                                detail = "스크립트 오류 수정 중"
+                                detail = "스크립트 오류 수정"
                             elif prev_phase == "validating" or "validation failed" in last_msg.lower():
-                                detail = "요구사항 검증 오류 수정 중"
+                                detail = "요구사항 검증 오류 수정"
                             else:
-                                detail = "오류 수정(리팩트) 중"
+                                detail = "리팩트 중"
                         if stage != last_stage:
                             last_stage = stage
                             yield json.dumps({"type": "stage", "stage": stage, "detail": detail}, ensure_ascii=False) + "\n"
@@ -759,7 +760,18 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                         yield json.dumps({"type": "progress", "iterations": it}, ensure_ascii=False) + "\n"
 
             yield json.dumps({"type": "stage", "stage": "finalizing", "detail": "결과 정리 중"}, ensure_ascii=False) + "\n"
-            payload_model = _serialize_result(last_state or initial_state)
+            final_state = last_state or initial_state
+            if isinstance(final_state, dict):
+                trace_name = write_internal_trace_markdown(final_state)
+                if trace_name:
+                    files = final_state.get("output_files") or []
+                    if not isinstance(files, list):
+                        files = []
+                    if trace_name not in files:
+                        files.append(trace_name)
+                    final_state["output_files"] = files
+
+            payload_model = _serialize_result(final_state)
             if payload_model.run_id and payload_model.output_files:
                 _register_run_outputs(payload_model.run_id, payload_model.output_files)
             payload = payload_model.model_dump()

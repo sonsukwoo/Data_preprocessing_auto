@@ -64,10 +64,10 @@ body {
 }
 
 .layout {
-  width: 100%;
-  max-width: 100%;
-  margin: 12px 0;
-  padding: 0 clamp(12px, 2vw, 20px) 32px;
+  width: min(100%, 1320px);
+  max-width: 1320px;
+  margin: 12px auto;
+  padding: 0 16px 32px;
   display: grid;
   grid-template-columns: 1fr;
   gap: 16px;
@@ -258,6 +258,77 @@ button:hover:not(:disabled) {
   gap: 8px;
 }
 
+.refactor-details {
+  position: relative;
+}
+
+.refactor-details summary {
+  list-style: none;
+}
+
+.refactor-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.refactor-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(43, 108, 176, 0.25);
+  background: rgba(43, 108, 176, 0.08);
+  cursor: pointer;
+  user-select: none;
+}
+
+.refactor-pill:hover {
+  border-color: rgba(43, 108, 176, 0.35);
+}
+
+.refactor-pill-label {
+  font-weight: 800;
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.refactor-details.active-refactor .refactor-pill {
+  border-color: rgba(239, 68, 68, 0.55);
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.refactor-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(520px, 80vw);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 10px;
+  z-index: 5;
+}
+
+.refactor-panel-title {
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.refactor-events {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.refactor-events li {
+  margin: 6px 0;
+}
+
 .refactor-badge {
   display: inline-flex;
   align-items: center;
@@ -267,8 +338,8 @@ button:hover:not(:disabled) {
   border-radius: 999px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  background: rgba(43, 108, 176, 0.10);
-  border: 1px solid rgba(43, 108, 176, 0.20);
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.06);
   color: var(--text);
 }
 

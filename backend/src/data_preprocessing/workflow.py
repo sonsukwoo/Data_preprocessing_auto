@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import traceback
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict
@@ -21,6 +22,28 @@ from .prompts import code_gen_prompt, reflect_prompt
 from .tools import list_images_to_csv, load_and_sample
 
 # ==================================== 유틸: 공용 유틸 함수 영역 =====================
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _append_trace(state: State | dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    existing = None
+    if isinstance(state, dict):
+        existing = state.get("trace")
+    else:
+        existing = getattr(state, "trace", None)
+    trace = list(existing or [])
+    trace.append(event)
+    return {"trace": trace}
+
+
+def _safe_last_message(messages: list[Any]) -> str:
+    try:
+        return _extract_last_message_text(messages)
+    except Exception:
+        return ""
+
+
 def _extract_user_request(messages: list[Any]) -> str:
     if not messages:
         return ""
@@ -136,7 +159,21 @@ def add_requirements(state: State):
     """사용자 요청에서 요구사항을 뽑아 state에 저장."""
     user_request = state.get("user_request", "")
     reqs = _extract_requirements_from_user_request(user_request)
-    return {"requirements": reqs, "phase": "analyzing"}
+    return {
+        "requirements": reqs,
+        "phase": "analyzing",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "add_requirements",
+                "phase": "analyzing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "requirements": [r.model_dump() for r in reqs],
+            },
+        ),
+    }
 # ============================= 유틸 끝 ==========================================
 
 
@@ -152,7 +189,23 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI):
     )
     response = llm_with_tools.invoke([("system", system), *state["messages"]])
     user_req = state.get("user_request") or _extract_user_request(state.get("messages", []))
-    return {"messages": [response], "user_request": user_req, "phase": "analyzing"}
+    return {
+        "messages": [response],
+        "user_request": user_req,
+        "phase": "analyzing",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "chatbot",
+                "phase": "analyzing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_req,
+                "tool_calls": getattr(response, "tool_calls", None),
+                "assistant_message": getattr(response, "content", None),
+            },
+        ),
+    }
 
 # add_context: 툴 결과(샘플/매니페스트/에러)를 컨텍스트에 저장
 def add_context(state: State):
@@ -180,7 +233,23 @@ def add_context(state: State):
     if not context_str:
         raise ValueError("No tool result found; ensure tool call executed or supported format present")
 
-    return {"context": context_str, "user_request": state.get("user_request", ""), "phase": "sampling"}
+    user_request = state.get("user_request", "")
+    return {
+        "context": context_str,
+        "user_request": user_request,
+        "phase": "sampling",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "add_context",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context": context_str,
+            },
+        ),
+    }
 
 # friendly_error: 로딩 실패 등 오류 컨텍스트를 비개발자용 한글 메시지로 변환
 def friendly_error(state: State, llm_gpt: ChatOpenAI):
@@ -201,7 +270,23 @@ def friendly_error(state: State, llm_gpt: ChatOpenAI):
     )
 
     resp = llm_gpt.invoke(prompt)
-    return {"final_user_messages": [("assistant", resp.content)], "error": "yes", "phase": "finalizing"}
+    return {
+        "final_user_messages": [("assistant", resp.content)],
+        "error": "yes",
+        "phase": "finalizing",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "friendly_error",
+                "phase": "finalizing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context": context,
+                "assistant_message": resp.content,
+            },
+        ),
+    }
 
 
 def final_friendly_error(state: State, llm_gpt: ChatOpenAI):
@@ -220,7 +305,23 @@ def final_friendly_error(state: State, llm_gpt: ChatOpenAI):
         "출력 형식:\n원인: ...\n대처: ...\n"
     )
     resp = llm_gpt.invoke(prompt)
-    return {"final_user_messages": [("assistant", resp.content)], "error": "yes", "phase": "finalizing"}
+    return {
+        "final_user_messages": [("assistant", resp.content)],
+        "error": "yes",
+        "phase": "finalizing",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "final_friendly_error",
+                "phase": "finalizing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "raw_error": raw_error,
+                "assistant_message": resp.content,
+            },
+        ),
+    }
 
 # generate: 컨텍스트+요청으로 코드 초안 생성
 def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
@@ -249,7 +350,24 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
         ),
     ]
 
-    return {"generation": code_solution, "messages": messages, "phase": "generating"}
+    return {
+        "generation": code_solution,
+        "messages": messages,
+        "phase": "generating",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "generate",
+                "phase": "generating",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "output_formats": output_formats,
+                "requirements": [r.model_dump() for r in (reqs or [])],
+                "generation": {"imports": code_solution.imports, "code": code_solution.code},
+            },
+        ),
+    }
 
 # code_check: 생성 코드 실행 및 에러 감지
 def code_check(state: State):
@@ -281,6 +399,19 @@ def code_check(state: State):
             "error": "yes",
             "phase": "executing",
             "execution_stdout": captured,
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "code_check",
+                    "phase": "executing",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "error_detail": error_detail,
+                    "execution_stdout": captured,
+                    "generation": {"imports": imports, "code": code},
+                },
+            ),
         }
     except BaseException as exc:  # noqa: BLE001
         # 호스트에서 인터럽트가 오면 서버가 정상 종료되도록 그대로 전파
@@ -297,6 +428,19 @@ def code_check(state: State):
             "error": "yes",
             "phase": "executing",
             "execution_stdout": captured,
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "code_check",
+                    "phase": "executing",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "error_detail": error_detail,
+                    "execution_stdout": captured,
+                    "generation": {"imports": imports, "code": code},
+                },
+            ),
         }
     finally:
         # 이후 stdout 추출이 실패하더라도, 작업 디렉터리는 최대한 원복
@@ -317,6 +461,19 @@ def code_check(state: State):
         "execution_stdout": output_preview,
         "validation_report": validation_report if isinstance(validation_report, dict) else None,
         "execution_workdir": str(execution_workdir),
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "code_check",
+                "phase": "executing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "error": "no",
+                "execution_stdout": output_preview,
+                "validation_report": validation_report if isinstance(validation_report, dict) else None,
+                "generation": {"imports": imports, "code": code},
+            },
+        ),
     }
 
 # validate: 실행 결과(검증 리포트)를 기반으로 누락(silent miss) 감지
@@ -340,7 +497,24 @@ def validate(state: State):
                 f"Execution stdout (tail):\n{stdout_tail}",
             )
         ]
-        return {"messages": error_message, "error": "yes", "phase": "validating"}
+        return {
+            "messages": error_message,
+            "error": "yes",
+            "phase": "validating",
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "validate",
+                    "phase": "validating",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "validation_report": report,
+                    "execution_stdout_tail": stdout_tail,
+                    "last_message": _safe_last_message(state.get("messages", [])),
+                },
+            ),
+        }
 
     if "ok" not in report or "issues" not in report:
         if execution_workdir:
@@ -352,7 +526,23 @@ def validate(state: State):
                 f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=3000)}",
             )
         ]
-        return {"messages": error_message, "error": "yes", "phase": "validating"}
+        return {
+            "messages": error_message,
+            "error": "yes",
+            "phase": "validating",
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "validate",
+                    "phase": "validating",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "validation_report": report,
+                    "last_message": _safe_last_message(state.get("messages", [])),
+                },
+            ),
+        }
 
     ok = report.get("ok")
 
@@ -368,7 +558,23 @@ def validate(state: State):
                 f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=3000)}",
             )
         ]
-        return {"messages": error_message, "error": "yes", "phase": "validating"}
+        return {
+            "messages": error_message,
+            "error": "yes",
+            "phase": "validating",
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "validate",
+                    "phase": "validating",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "validation_report": report,
+                    "last_message": _safe_last_message(state.get("messages", [])),
+                },
+            ),
+        }
 
     # 사용자 요구사항 강제: 요구사항 누락/실패 시 리팩트(reflect) 루프로 보낸다.
     if reqs:
@@ -385,7 +591,23 @@ def validate(state: State):
                 "Your script MUST report requirement-level pass/fail in __validation_report__['requirements'].\n"
                 f"Required:\n{req_list}\n"
             )
-            return {"messages": [("user", msg)], "error": "yes", "phase": "validating"}
+            return {
+                "messages": [("user", msg)],
+                "error": "yes",
+                "phase": "validating",
+                **_append_trace(
+                    state,
+                    {
+                        "ts": _now_iso(),
+                        "node": "validate",
+                        "phase": "validating",
+                        "iterations": int(state.get("iterations", 0) or 0),
+                        "error": "yes",
+                        "validation_report": report,
+                        "last_message": msg,
+                    },
+                ),
+            }
 
         missing_ids: list[str] = []
         failed_ids: list[str] = []
@@ -415,7 +637,23 @@ def validate(state: State):
                 f"{req_list}\n"
                 f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=4000)}"
             )
-            return {"messages": [("user", msg)], "error": "yes", "phase": "validating"}
+            return {
+                "messages": [("user", msg)],
+                "error": "yes",
+                "phase": "validating",
+                **_append_trace(
+                    state,
+                    {
+                        "ts": _now_iso(),
+                        "node": "validate",
+                        "phase": "validating",
+                        "iterations": int(state.get("iterations", 0) or 0),
+                        "error": "yes",
+                        "validation_report": report,
+                        "last_message": msg,
+                    },
+                ),
+            }
 
     # metrics에 "<col>_missing"/"<col>_empty"가 있으면, 대응하는 placeholder/fallback 메트릭도 요구한다.
     # "정보 없음" 같은 placeholder로 미매핑 값을 숨기는 것을 방지한다.
@@ -446,7 +684,23 @@ def validate(state: State):
                 f"Columns requiring placeholder metrics: {missing_placeholder_metrics}\n"
                 f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=3000)}"
             )
-            return {"messages": [("user", msg)], "error": "yes", "phase": "validating"}
+            return {
+                "messages": [("user", msg)],
+                "error": "yes",
+                "phase": "validating",
+                **_append_trace(
+                    state,
+                    {
+                        "ts": _now_iso(),
+                        "node": "validate",
+                        "phase": "validating",
+                        "iterations": int(state.get("iterations", 0) or 0),
+                        "error": "yes",
+                        "validation_report": report,
+                        "last_message": msg,
+                    },
+                ),
+            }
 
     metric_flags: list[str] = []
     if isinstance(metrics, dict):
@@ -471,8 +725,36 @@ def validate(state: State):
                 "phase": "validating",
                 "output_files": moved,
                 "messages": [("user", f"Outputs promoted: {moved}")],
+                **_append_trace(
+                    state,
+                    {
+                        "ts": _now_iso(),
+                        "node": "validate",
+                        "phase": "validating",
+                        "iterations": int(state.get("iterations", 0) or 0),
+                        "error": "no",
+                        "validation_report": report,
+                        "output_files": moved,
+                    },
+                ),
             }
-        return {"error": "no", "phase": "validating", "output_files": []}
+        return {
+            "error": "no",
+            "phase": "validating",
+            "output_files": [],
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "validate",
+                    "phase": "validating",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "no",
+                    "validation_report": report,
+                    "output_files": [],
+                },
+            ),
+        }
 
     # ok=True가 명시되지 않으면 실패로 처리(요구사항 누락(silent miss) 방지)
     issues = report.get("issues")
@@ -500,7 +782,23 @@ def validate(state: State):
     ]
     if execution_workdir:
         _cleanup_dir(execution_workdir)
-    return {"messages": error_message, "error": "yes", "phase": "validating"}
+    return {
+        "messages": error_message,
+        "error": "yes",
+        "phase": "validating",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "validate",
+                "phase": "validating",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "error": "yes",
+                "validation_report": report,
+                "last_message": _safe_last_message(state.get("messages", [])),
+            },
+        ),
+    }
 
 
 # reflect: 실행 오류를 기반으로 수정 코드 재생성
@@ -530,7 +828,192 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
         "messages": messages,
         "iterations": state["iterations"] + 1,
         "phase": "refactoring",
+        **_append_trace(
+            state,
+            {
+                "ts": _now_iso(),
+                "node": "reflect",
+                "phase": "refactoring",
+                "iterations": int(state.get("iterations", 0) or 0) + 1,
+                "error_input": error,
+                "generation": {"imports": reflections.imports, "code": reflections.code},
+            },
+        ),
     }
+
+
+def write_internal_trace_markdown(state: Dict[str, Any]) -> str | None:
+    """누적된 trace를 Markdown 파일로 backend/outputs에 저장하고 파일명을 반환."""
+    trace = state.get("trace") or []
+    if not isinstance(trace, list) or not trace:
+        return None
+
+    run_id = str(state.get("run_id") or "").strip()
+    if not run_id:
+        return None
+
+    out_dir = _outputs_root_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"run_{run_id}_internal_trace.md"
+    path = (out_dir / filename).resolve()
+    try:
+        path.relative_to(out_dir.resolve())
+    except Exception:
+        return None
+
+    def _md_code(lang: str, text: str) -> str:
+        return f"```{lang}\n{text}\n```"
+
+    lines: list[str] = []
+    lines.append("# 내부 기록 (Internal Trace)")
+    lines.append("")
+    lines.append(f"- run_id: `{run_id}`")
+    lines.append(f"- created_at: `{_now_iso()}`")
+    lines.append(f"- output_formats: `{state.get('output_formats')}`")
+    lines.append("")
+
+    final_files = state.get("output_files") or []
+    if isinstance(final_files, list):
+        lines.append("## 최종 산출물")
+        lines.append("")
+        if final_files:
+            for f in final_files:
+                lines.append(f"- `{f}`")
+        else:
+            lines.append("- (none)")
+        lines.append("")
+
+    lines.append("## 이벤트 로그")
+    lines.append("")
+
+    for idx, ev in enumerate(trace, start=1):
+        if not isinstance(ev, dict):
+            lines.append(f"### Step {idx}")
+            lines.append("")
+            lines.append(_md_code("text", str(ev)))
+            lines.append("")
+            continue
+
+        node = str(ev.get("node") or "")
+        phase = str(ev.get("phase") or "")
+        ts = str(ev.get("ts") or "")
+        it = ev.get("iterations")
+        title_bits = [b for b in [node or "event", phase] if b]
+        title = " / ".join(title_bits)
+        lines.append(f"### Step {idx}: {title}")
+        lines.append("")
+        if ts:
+            lines.append(f"- ts: `{ts}`")
+        if it is not None:
+            lines.append(f"- iterations: `{it}`")
+        if "error" in ev:
+            lines.append(f"- error: `{ev.get('error')}`")
+        lines.append("")
+
+        if ev.get("user_request"):
+            lines.append("**user_request**")
+            lines.append("")
+            lines.append(_md_code("text", str(ev.get("user_request"))))
+            lines.append("")
+
+        if ev.get("requirements"):
+            lines.append("**requirements**")
+            lines.append("")
+            lines.append(_md_code("json", json.dumps(ev.get("requirements"), ensure_ascii=False, indent=2)))
+            lines.append("")
+
+        if ev.get("context"):
+            lines.append("**context (sampling/summary)**")
+            lines.append("")
+            lines.append(_md_code("text", str(ev.get("context"))))
+            lines.append("")
+
+        if ev.get("generation"):
+            gen = ev.get("generation") or {}
+            if isinstance(gen, dict):
+                imports = str(gen.get("imports") or "")
+                code = str(gen.get("code") or "")
+                lines.append("**generated imports**")
+                lines.append("")
+                lines.append(_md_code("python", imports))
+                lines.append("")
+                lines.append("**generated code**")
+                lines.append("")
+                lines.append(_md_code("python", code))
+                lines.append("")
+            else:
+                lines.append("**generation**")
+                lines.append("")
+                lines.append(_md_code("text", str(gen)))
+                lines.append("")
+
+        if ev.get("tool_calls") is not None:
+            lines.append("**tool_calls**")
+            lines.append("")
+            lines.append(_md_code("json", json.dumps(ev.get("tool_calls"), ensure_ascii=False, indent=2, default=str)))
+            lines.append("")
+
+        if ev.get("assistant_message"):
+            lines.append("**assistant_message**")
+            lines.append("")
+            lines.append(_md_code("text", str(ev.get("assistant_message"))))
+            lines.append("")
+
+        if ev.get("error_detail"):
+            lines.append("**error_detail**")
+            lines.append("")
+            lines.append(_md_code("text", str(ev.get("error_detail"))))
+            lines.append("")
+
+        if ev.get("execution_stdout"):
+            lines.append("**execution_stdout**")
+            lines.append("")
+            lines.append(_md_code("text", str(ev.get("execution_stdout"))))
+            lines.append("")
+
+        if ev.get("validation_report") is not None:
+            lines.append("**validation_report**")
+            lines.append("")
+            lines.append(_md_code("json", json.dumps(ev.get("validation_report"), ensure_ascii=False, indent=2, default=str)))
+            lines.append("")
+
+        if ev.get("output_files"):
+            lines.append("**output_files**")
+            lines.append("")
+            lines.append(_md_code("json", json.dumps(ev.get("output_files"), ensure_ascii=False, indent=2)))
+            lines.append("")
+
+        known = {
+            "ts",
+            "node",
+            "phase",
+            "iterations",
+            "user_request",
+            "requirements",
+            "context",
+            "generation",
+            "tool_calls",
+            "assistant_message",
+            "error",
+            "error_detail",
+            "execution_stdout",
+            "validation_report",
+            "output_files",
+            "raw_error",
+            "last_message",
+            "output_formats",
+            "execution_stdout_tail",
+            "error_input",
+        }
+        extras = {k: v for k, v in ev.items() if k not in known}
+        if extras:
+            lines.append("**extras**")
+            lines.append("")
+            lines.append(_md_code("json", json.dumps(extras, ensure_ascii=False, indent=2, default=str)))
+            lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return filename
 # ===================================== 노드 함수 끝 =============================
 
 # ======================================= 라우터: 조건 분기 함수 영역 ======================
@@ -666,9 +1149,20 @@ def run_request(
         "user_request": request,
         "output_formats": output_formats,
         "final_user_messages": None,
+        "trace": [],
     }
-    return graph.invoke(initial_state)
+    result = graph.invoke(initial_state)
+    if isinstance(result, dict):
+        trace_name = write_internal_trace_markdown(result)
+        if trace_name:
+            files = result.get("output_files") or []
+            if not isinstance(files, list):
+                files = []
+            if trace_name not in files:
+                files.append(trace_name)
+            result["output_files"] = files
+    return result
 # ===== 엔트리포인트 끝 =====
 
 
-__all__ = ["build_graph", "run_request"]
+__all__ = ["build_graph", "run_request", "write_internal_trace_markdown"]

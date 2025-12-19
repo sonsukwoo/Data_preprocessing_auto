@@ -14,6 +14,8 @@ const fileSummary = $("file-summary");
 const dropzone = $("dropzone");
 const outputFormatSelect = $("output_format");
 const refactorCountInlineEl = $("refactor-count-inline");
+const refactorDetailsEl = $("refactor-details");
+const refactorEventsEl = $("refactor-events");
 const progressEl = $("progress");
 const stageTextEl = $("stage-text");
 const stageDetailEl = $("stage-detail");
@@ -24,6 +26,7 @@ const downloadsNoteEl = $("downloads-note");
 let selectedFiles = [];
 let currentStage = "queued";
 let hasRefactored = false;
+let refactorEvents = [];
 
 async function checkHealth() {
   try {
@@ -85,7 +88,10 @@ function setRefactorCount(n) {
   const val = String(n ?? 0);
   if (refactorCountInlineEl) refactorCountInlineEl.textContent = val;
   if (Number(n || 0) > 0) hasRefactored = true;
-  // stage UI may need to update "리팩트" done state based on count
+  if (refactorDetailsEl) {
+    refactorDetailsEl.classList.toggle("has-refactors", Number(n || 0) > 0);
+  }
+  // stage UI may need to update visuals based on count
   setStage(currentStage, stageDetailEl?.textContent || "");
 }
 
@@ -107,9 +113,13 @@ const STAGE_LABELS = {
 function setStage(stage, detail = "") {
   if (!progressEl || !stepperEl) return;
 
+  const prevStage = currentStage;
   currentStage = stage;
   if (stage === BRANCH_STAGE) hasRefactored = true;
   progressEl.classList.toggle("failed", stage === "error");
+  if (refactorDetailsEl) {
+    refactorDetailsEl.classList.toggle("active-refactor", stage === BRANCH_STAGE);
+  }
 
   // main flow: queued → analyzing → sampling → generating → executing → finalizing → done
   const mainIndexByStage = new Map(MAIN_STAGES.map((s, i) => [s, i]));
@@ -122,7 +132,6 @@ function setStage(stage, detail = "") {
   steps.forEach((el) => {
     const s = el.getAttribute("data-stage") || "";
     const isMain = mainIndexByStage.has(s);
-    const isBranch = s === BRANCH_STAGE;
 
     el.classList.remove("active", "done");
     if (stage === "error") return;
@@ -138,21 +147,30 @@ function setStage(stage, detail = "") {
         if (stage === "done") el.classList.add("done");
       }
     }
-
-    if (isBranch) {
-      if (stage === BRANCH_STAGE) el.classList.add("active");
-      if (hasRefactored && stage !== BRANCH_STAGE) el.classList.add("done");
-      if (!hasRefactored && stage !== BRANCH_STAGE) {
-        // keep dimmed unless branch is taken
-        el.classList.remove("done");
-      }
-    }
   });
 
   // arrows removed from UI
 
   if (stageTextEl) stageTextEl.textContent = STAGE_LABELS[stage] || stage;
   if (stageDetailEl) stageDetailEl.textContent = detail || "";
+
+  if (stage === BRANCH_STAGE && prevStage !== BRANCH_STAGE) {
+    const clean = String(detail || "").trim();
+    const ts = new Date();
+    const timeLabel = ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const entry = clean ? `[${timeLabel}] ${clean}` : `[${timeLabel}] 리팩트 시작`;
+    if (refactorEvents.length === 0 || refactorEvents[refactorEvents.length - 1] !== entry) {
+      refactorEvents = [...refactorEvents, entry].slice(-20);
+      if (refactorEventsEl) {
+        refactorEventsEl.innerHTML = "";
+        refactorEvents.forEach((t) => {
+          const li = document.createElement("li");
+          li.textContent = t;
+          refactorEventsEl.appendChild(li);
+        });
+      }
+    }
+  }
 }
 
 function renderResult(data) {
@@ -172,6 +190,17 @@ function renderResult(data) {
       a.textContent = name;
       a.setAttribute("download", name);
       li.appendChild(a);
+
+      const isMarkdown = name.toLowerCase().endsWith(".md");
+      const isInternalTrace = name.toLowerCase().includes("internal_trace");
+      if (isMarkdown || isInternalTrace) {
+        const note = document.createElement("div");
+        note.className = "preview muted";
+        note.textContent = "미리보기 없음(문서 파일)";
+        li.appendChild(note);
+        downloadsEl.appendChild(li);
+        return;
+      }
 
       const previewWrap = document.createElement("div");
       previewWrap.className = "preview";
@@ -347,6 +376,9 @@ form.addEventListener("submit", async (e) => {
 
   try {
     setRefactorCount(0);
+    refactorEvents = [];
+    if (refactorEventsEl) refactorEventsEl.innerHTML = "";
+    if (refactorDetailsEl) refactorDetailsEl.open = false;
     setStage("queued", "요청 준비 중");
     let finalQuestion = question;
 

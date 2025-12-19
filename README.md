@@ -22,6 +22,9 @@ AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 ```
 
+참고:
+- S3 업로드를 쓰지 않으면 AWS 키는 생략 가능합니다.
+
 2) 실행
 
 ```bash
@@ -97,7 +100,8 @@ flowchart TD
 3) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 4) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 5) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
-6) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공
+6) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
+7) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링 요약을 모아 `run_<run_id>_internal_trace.md`를 함께 생성
 
 ---
 
@@ -107,6 +111,22 @@ UI는 우선 **S3 presigned PUT** 업로드를 시도합니다.
 브라우저에서 S3로 직접 업로드하려면 **버킷 CORS 설정**이 필요합니다(미설정 시 Safari/Chrome에서 `Load failed` 가능).
 
 S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)로 폴백합니다.
+
+---
+
+## 내부 기록 파일 (Trace)
+
+매 실행마다 아래 파일이 결과물로 함께 생성됩니다:
+
+- `run_<run_id>_internal_trace.md`
+
+포함 내용:
+- 단계별 타임라인 (`add_requirements → chatbot → add_context → generate → code_check → validate → reflect`)
+- 각 iteration에서 생성된 코드(imports + script)
+- 실행 오류(traceback), stdout, validation report
+- 샘플링 결과 요약
+
+과제 제출용으로 “블랙박스가 아닌 내부 동작 증빙”에 활용할 수 있습니다.
 
 ---
 

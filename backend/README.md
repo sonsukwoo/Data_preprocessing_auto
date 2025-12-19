@@ -41,6 +41,7 @@ python -m data_preprocessing.cli --request "<요청 문구>" --max-iterations 3
 
 - 서버/도커 같은 비대화형 환경에서는 키가 없으면 실패합니다.
 - 로컬 터미널에서 CLI 실행 시에는(tty) 필요하면 입력 프롬프트가 뜰 수 있습니다.
+ - S3 presign 업로드를 쓰지 않으면 AWS 키는 생략 가능합니다.
 
 ## 테스트
 현재 자동화 테스트는 없습니다. 필요 시 `tests/` 디렉터리를 만들고 `make test`로 실행할 수 있습니다.
@@ -62,5 +63,9 @@ make serve              # uvicorn --reload, 기본 포트 8000
 - `POST /s3/create_upload_session`, `POST /s3/presign_put` · (옵션) S3 presigned 업로드 지원
 - `GET /downloads/{run_id}/{filename}` · 산출물 다운로드
 - `GET /downloads/{run_id}/{filename}/preview?n=5` · 산출물 미리보기(표 파일만)
+
+## 내부 기록 파일 (Trace)
+실행마다 `backend/outputs/run_<run_id>_internal_trace.md`가 생성됩니다.  
+에이전트 단계/코드/에러/검증/샘플링 요약이 포함되며, 과제 증빙 용도로 활용할 수 있습니다.
 
 프런트는 도커/Nginx 환경에서 `/api`로 호출하도록 구성돼 있습니다.

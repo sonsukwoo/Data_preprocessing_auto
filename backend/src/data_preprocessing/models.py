@@ -38,6 +38,7 @@ class State(MessagesState):
     validation_report: Optional[dict[str, Any]] = None
     execution_workdir: Optional[str] = None
     final_user_messages: Optional[list[Any]] = None
+    trace: Optional[list[dict[str, Any]]] = None
 
 
 __all__ = ["Requirement", "CodeBlocks", "State"]

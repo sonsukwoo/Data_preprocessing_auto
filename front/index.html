@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>데이터 전처리 에이전트</title>
-    <link rel="stylesheet" href="style.css?v=20251219-5" />
+    <link rel="stylesheet" href="style.css?v=20251219-9" />
   </head>
   <body>
     <header class="topbar">
@@ -56,8 +56,16 @@
           <div class="progress-top">
             <div class="label">진행 상황</div>
             <div class="progress-meta">
-              <span class="muted">오류 수정(리팩트)</span>
-              <span id="refactor-count-inline" class="refactor-badge">0</span>
+              <details id="refactor-details" class="refactor-details">
+                <summary class="refactor-pill">
+                  <span class="refactor-pill-label">리팩트</span>
+                  <span id="refactor-count-inline" class="refactor-badge">0</span>
+                </summary>
+                <div class="refactor-panel">
+                  <div class="refactor-panel-title">최근 리팩트</div>
+                  <ul id="refactor-events" class="refactor-events"></ul>
+                </div>
+              </details>
             </div>
           </div>
           <div class="stepper-flow" id="stepper">
@@ -74,8 +82,6 @@
             <div class="step main" data-stage="finalizing" style="grid-column: 11">정리</div>
             <div class="arrow" aria-hidden="true" style="grid-column: 12">→</div>
             <div class="step main" data-stage="done" style="grid-column: 13">완료</div>
-
-            <div class="step branch" data-stage="refactoring" style="grid-row: 2; grid-column: 9">리팩트</div>
           </div>
         <div class="progress-text">
           <span id="stage-text" class="stage-text">대기 중</span>
@@ -99,6 +105,6 @@
     </main>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="script.js?v=20251219-2"></script>
+    <script src="script.js?v=20251219-3"></script>
   </body>
 </html>
