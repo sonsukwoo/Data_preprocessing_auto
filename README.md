@@ -127,25 +127,29 @@ flowchart TD
   D0 -->|없음| END([END])
   D0 -->|있음| X[add_context<br/>tool call 분기]
 
-  X --> D1{tool 이름}
-  D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
-  D1 -->|sample_table| S[run_sample<br/>샘플링]
-  D1 -->|summarize_table| M[run_summarize<br/>요약]
-  D1 -->|list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
-  D1 -->|load_and_sample| LAS[run_load_and_sample<br/>통합 샘플링]
+  %% 복잡한 입력/샘플링 구간은 서브그래프로 묶어 요약
+  subgraph INPUT["입력/샘플링 파트 요약"]
+    direction TB
+    X --> D1{tool 이름}
+    D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
+    D1 -->|sample_table| S[run_sample<br/>샘플링]
+    D1 -->|summarize_table| M[run_summarize<br/>요약]
+    D1 -->|list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
+    D1 -->|load_and_sample| LAS[run_load_and_sample<br/>통합 샘플링]
 
-  I --> D2{입력 타입}
-  D2 -->|이미지| IMG
-  D2 -->|테이블| S
-  D2 -->|오류| B[build_context<br/>컨텍스트 확정]
+    I --> D2{입력 타입}
+    D2 -->|이미지| IMG
+    D2 -->|테이블| S
+    D2 -->|오류| B[build_context<br/>컨텍스트 확정]
 
-  S --> D3{샘플 성공?}
-  D3 -->|성공| M
-  D3 -->|오류| B
+    S --> D3{샘플 성공?}
+    D3 -->|성공| M
+    D3 -->|오류| B
 
-  M --> B
-  IMG --> B
-  LAS --> B
+    M --> B
+    IMG --> B
+    LAS --> B
+  end
 
   B --> D4{ERROR_CONTEXT?}
   D4 -->|예| FE[friendly_error<br/>에러를 한글로 요약]
@@ -166,6 +170,8 @@ flowchart TD
   RF --> E
   FE --> END
   FFE --> END
+
+  style INPUT fill:#EAF2FF,stroke:#B5C9F7,stroke-width:1px
 ```
 
 ### 노드별 역할 요약
