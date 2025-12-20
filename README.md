@@ -94,19 +94,15 @@ docker compose down
 
 ```mermaid
 flowchart LR
-  U["User (Browser)"] -->|"HTTP"| N["Nginx (front :8080)"]
-  N -->|"API Proxy"| A["FastAPI (backend :8000)"]
-  A --> G["LangGraph Agent"]
-
-  G -->|"Tool Call"| T["inspect_input, sample_table, summarize_table, list_images_to_csv, load_and_sample (필요 시)"]
-  G -->|"Generate Code"| P["Python Script"]
-
-  P -->|"Write Outputs"| O["backend/outputs"]
-  A -->|"Download & Preview"| U
-  %% Optional S3 flow
-  U -. "Presigned PUT" .-> S3["S3 Bucket"]
-  A -. "Download on s3:// input" .-> S3
+  A[요청 해석/요구사항] --> B[입력/샘플링 요약]
+  B --> C[코드 생성]
+  C --> D[실행]
+  D --> E{검증}
+  E -->|통과| F[완료]
+  E -->|실패| R[리플렉트] --> C
+  B -->|오류| X[친절 오류] --> F
 ```
+
 
 ### LangGraph 처리 흐름(핵심)
 
