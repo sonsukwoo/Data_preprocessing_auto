@@ -98,7 +98,7 @@ flowchart LR
   N -->|"API Proxy"| A["FastAPI (backend :8000)"]
   A --> G["LangGraph Agent"]
 
-  G -->|"Tool Call"| T["inspect_input, sample_table, summarize_table, list_images_to_csv"]
+  G -->|"Tool Call"| T["inspect_input, sample_table, summarize_table, list_images_to_csv, load_and_sample (필요 시)"]
   G -->|"Generate Code"| P["Python Script"]
 
   P -->|"Write Outputs"| O["backend/outputs"]
@@ -112,6 +112,11 @@ flowchart LR
 
 에이전트는 “요구사항 정리 → 데이터 샘플링 → 코드 생성 → 실행 → 검증”을 수행하고,
 실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.
+
+
+각 단계의 책임을 분리해 **실패 지점 추적·재시도·확장**을 쉽게 하기 위한 구조입니다.  
+예를 들어 `inspect → sample → summarize`를 분리하면 **어디서 실패했는지 trace만으로 즉시 확인**할 수 있고,  
+이미지 폴더/테이블/경로 오류 같은 **입력 유형별 분기**도 명확히 유지됩니다.
 
 ```mermaid
 flowchart TD
@@ -162,12 +167,12 @@ flowchart TD
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
 2) **요청 해석/툴 선택**: LLM이 tool call을 결정하고 실행 대상을 선택  
-3) **샘플링/요약**: `inspect_input` → `sample_table` → `summarize_table` (또는 이미지 폴더면 `list_images_to_csv`)  
+3) **샘플링/요약**: `inspect_input` → `sample_table` → `summarize_table` (또는 이미지 폴더면 `list_images_to_csv`, 필요 시 `load_and_sample`)  
 4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
-4) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
-5) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
-6) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
-7) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링 요약을 모아 `run_<run_id>_internal_trace_내부기록.md`를 함께 생성
+5) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
+6) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
+7) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
+8) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링 요약을 모아 `run_<run_id>_internal_trace_내부기록.md`를 함께 생성
 
 ---
 
@@ -217,7 +222,8 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - `run_<run_id>_internal_trace_내부기록.md`
 
 포함 내용:
-- 단계별 타임라인 (`add_requirements → chatbot → add_context → generate → code_check → validate → reflect`)
+- 단계별 타임라인 (`add_requirements → chatbot → add_context → run_inspect/run_sample/run_summarize → build_context → generate → code_check → validate → reflect`)
+- 입력 유형에 따라 `run_image_manifest` 또는 `run_load_and_sample` 경로로 분기될 수 있음
 - 각 iteration에서 생성된 코드(imports + script)
 - 실행 오류(traceback), stdout, validation report
 - 샘플링 결과 요약
