@@ -101,7 +101,7 @@ flowchart LR
   G -->|generate code| P[Python script]
   P -->|write outputs| O[(backend/outputs)]
   A -->|downloads + preview| U
-  A -->|optional| S3[(S3 bucket)]
+  A -->|optional| S3[S3 bucket]
 ```
 
 ### LangGraph 처리 흐름(핵심)
@@ -109,6 +109,23 @@ flowchart LR
 에이전트는 “요구사항 정리 → 데이터 샘플링 → 코드 생성 → 실행 → 검증”을 수행하고,
 실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.
 
+아래는 **축약 버전(입력/샘플링 파트 요약)** 입니다.
+
+```mermaid
+flowchart LR
+  A[요구사항 추출] --> B[요청 분석/도구 결정]
+  B --> C[입력·샘플링 요약]
+  C --> D{ERROR_CONTEXT?}
+  D -->|아니오| E[코드 생성]
+  E --> F[실행]
+  F --> G{검증}
+  G -->|통과| H[완료]
+  G -->|실패| R[리플렉트] --> E
+  D -->|예| X[친절 오류] --> H
+```
+
+<details>
+<summary>상세 그래프 / 노드 설명 보기</summary>
 
 각 단계의 책임을 분리해 **실패 지점 추적·재시도·확장**을 쉽게 하기 위한 구조입니다.  
 예를 들어 `inspect → sample → summarize`를 분리하면 **어디서 실패했는지 trace만으로 즉시 확인**할 수 있고,  
@@ -189,7 +206,11 @@ flowchart TD
 - **reflect**: 오류 원인 기반 코드 재생성
 - **final_friendly_error**: 반복 실패 시 최종 요약 메시지 생성
 
+</details>
+
 ---
+
+
 
 ## 어떻게 “전처리”가 수행되나 (동작 설명)
 
