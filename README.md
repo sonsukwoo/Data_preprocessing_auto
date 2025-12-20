@@ -201,11 +201,3 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - 샘플링 결과 요약
 
 “블랙박스가 아닌 내부 동작 증빙”에 활용할 수 있습니다.
-
----
-
-
-- 코드 수정 후 반영: `docker compose up --build` (또는 `docker compose up -d --build`)
-- 상태/로그:
-  - `docker compose ps`
-  - `docker compose logs -f --tail=200`
