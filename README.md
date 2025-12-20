@@ -123,35 +123,42 @@ flowchart TD
   START([START]) --> R[add_requirements<br/>요구사항 추출]
   R --> C[chatbot<br/>요청 분석 + tool call 결정]
 
-  C -->|tool_calls 있음| X[add_context<br/>tool call 선택]
-  C -->|tool_calls 없음| END([END])
+  C --> D0{tool_calls 있음?}
+  D0 -->|없음| END([END])
+  D0 -->|있음| X[add_context<br/>tool call 분기]
 
-  X --> I[run_inspect<br/>입력 경로 검사]
-  X --> S[run_sample<br/>샘플링]
-  X --> M[run_summarize<br/>요약]
-  X --> IMG[run_image_manifest<br/>이미지 매니페스트]
-  X --> LAS[run_load_and_sample<br/>통합 샘플링]
+  X --> D1{tool 이름}
+  D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
+  D1 -->|sample_table| S[run_sample<br/>샘플링]
+  D1 -->|summarize_table| M[run_summarize<br/>요약]
+  D1 -->|list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
+  D1 -->|load_and_sample| LAS[run_load_and_sample<br/>통합 샘플링]
 
-  I -->|이미지| IMG
-  I -->|테이블| S
-  I -->|오류| B[build_context<br/>컨텍스트 확정]
+  I --> D2{입력 타입}
+  D2 -->|이미지| IMG
+  D2 -->|테이블| S
+  D2 -->|오류| B[build_context<br/>컨텍스트 확정]
 
-  S -->|성공| M
-  S -->|오류| B
+  S --> D3{샘플 성공?}
+  D3 -->|성공| M
+  D3 -->|오류| B
 
   M --> B
   IMG --> B
   LAS --> B
 
-  B -->|ERROR_CONTEXT| FE[friendly_error<br/>에러를 한글로 요약]
-  B -->|OK| G[generate<br/>전처리 스크립트 생성]
+  B --> D4{ERROR_CONTEXT?}
+  D4 -->|예| FE[friendly_error<br/>에러를 한글로 요약]
+  D4 -->|아니오| G[generate<br/>전처리 스크립트 생성]
 
   G --> E[code_check<br/>코드 실행]
-  E -->|성공| V[validate<br/>__validation_report__ 검증]
-  E -->|실패| D{max_iterations?}
+  E --> D5{실행 성공?}
+  D5 -->|성공| V[validate<br/>__validation_report__ 검증]
+  D5 -->|실패| D{max_iterations?}
 
-  V -->|통과| END
-  V -->|실패| D
+  V --> D6{검증 통과?}
+  D6 -->|통과| END
+  D6 -->|실패| D
 
   D -->|남음| RF[reflect<br/>오류 기반 수정]
   D -->|초과| FFE[final_friendly_error<br/>최종 실패 요약]
@@ -160,6 +167,23 @@ flowchart TD
   FE --> END
   FFE --> END
 ```
+
+### 노드별 역할 요약
+- **add_requirements**: 사용자 요청에서 요구사항을 구조화해 추출
+- **chatbot**: 요청 분석 및 tool call 결정
+- **add_context**: tool 실행 결과를 통합해 context 생성
+- **run_inspect**: 입력 경로 유효성/유형(이미지 vs 테이블) 판별
+- **run_sample**: 테이블 샘플링 수행
+- **run_summarize**: 샘플 요약(결측/분포/예시) 생성
+- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환
+- **run_load_and_sample**: inspect → sample → summarize 통합 처리
+- **build_context**: context 확정 및 오류 컨텍스트 설정
+- **friendly_error**: 사용자에게 보여줄 오류 메시지 생성
+- **generate**: 전처리 파이썬 스크립트 생성
+- **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
+- **validate**: validation_report 검증(요구사항/가드레일)
+- **reflect**: 오류 원인 기반 코드 재생성
+- **final_friendly_error**: 반복 실패 시 최종 요약 메시지 생성
 
 ---
 

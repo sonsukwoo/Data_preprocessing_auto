@@ -8,6 +8,7 @@ import asyncio
 import time
 import shutil
 import zipfile
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -281,8 +282,10 @@ def health() -> Dict[str, str]:
 
 def _safe_filename(filename: str) -> str:
     name = Path(filename).name  # drop any path components
-    # keep alnum, dash, underscore, dot
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    # macOS는 한글이 NFD(자모 분해)로 올 수 있어 NFC로 정규화
+    normalized = unicodedata.normalize("NFC", name)
+    # keep alnum, dash, underscore, dot, 한글
+    return re.sub(r"[^A-Za-z0-9._-가-힣ㄱ-ㅎㅏ-ㅣ]", "_", normalized)
 
 
 def _sanitize_parts(rel_path: str) -> Path:
@@ -291,26 +294,88 @@ def _sanitize_parts(rel_path: str) -> Path:
     for p in Path(rel_path).parts:
         if p in ("", ".", ".."):
             continue
-        # 한글 허용: A-Z, a-z, 숫자, ._- 및 가-힣
-        parts.append(re.sub(r"[^A-Za-z0-9._-가-힣]", "_", p))
+        # macOS는 한글이 NFD(자모 분해)로 올 수 있어 NFC로 정규화
+        normalized = unicodedata.normalize("NFC", p)
+        # 한글 허용: 완성형(가-힣) + 자모(ㄱ-ㅎ, ㅏ-ㅣ)
+        parts.append(re.sub(r"[^A-Za-z0-9._-가-힣ㄱ-ㅎㅏ-ㅣ]", "_", normalized))
     return Path(*parts)
 
 
 def _safe_extract_zip(zip_path: Path, extract_dir: Path) -> None:
     """ZipSlip 방지: zip 내부 경로가 extract_dir 밖으로 나가지 않게 검증 후 해제."""
     extract_dir = extract_dir.resolve()
+
+    def _decode_zip_name(name: str, member: zipfile.ZipInfo) -> str:
+        if not name:
+            return name
+        # zipfile이 이미 디코딩한 이름을 기반으로 여러 후보를 만들어 최적 선택
+        candidates: list[str] = [name]
+
+        # 기본 케이스: cp437로 재인코딩한 바이트를 utf-8/cp949로 복원 시도
+        try:
+            raw = name.encode("cp437")
+            for enc in ("utf-8", "cp949"):
+                try:
+                    candidates.append(raw.decode(enc))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 모지바케(예: Bä…)는 latin-1 재인코딩이 더 잘 복원되는 경우가 있음
+        try:
+            raw = name.encode("latin-1")
+            for enc in ("utf-8", "cp949"):
+                try:
+                    candidates.append(raw.decode(enc))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        def _score(s: str) -> int:
+            hangul = sum(
+                1
+                for ch in s
+                if ("\uAC00" <= ch <= "\uD7A3")  # 가-힣
+                or ("\u1100" <= ch <= "\u11FF")  # 자모 (초성/중성/종성)
+                or ("\u3130" <= ch <= "\u318F")  # 호환 자모
+            )
+            replacement = s.count("\ufffd")
+            return hangul * 10 - replacement * 5
+
+        best = max(candidates, key=_score)
+        return unicodedata.normalize("NFC", best)
+
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.infolist():
             # Normalize name and skip empty
             name = member.filename
             if not name:
                 continue
-            dest = (extract_dir / name).resolve()
+            normalized_name = _decode_zip_name(name, member)
+            dest = (extract_dir / normalized_name).resolve()
             try:
                 dest.relative_to(extract_dir)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f"ZIP에 잘못된 경로가 포함되어 있습니다: {name}") from exc
-        zf.extractall(extract_dir)
+        # 실제 추출 시도 (이때도 이름 정규화를 적용)
+        for member in zf.infolist():
+            name = member.filename
+            if not name:
+                continue
+            normalized_name = _decode_zip_name(name, member)
+            target = (extract_dir / normalized_name).resolve()
+            try:
+                target.relative_to(extract_dir)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"ZIP에 잘못된 경로가 포함되어 있습니다: {name}") from exc
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member, "r") as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
 
 
 def _maybe_extract_zip_file(path: Path) -> Path:
