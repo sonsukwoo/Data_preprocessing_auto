@@ -103,7 +103,9 @@ flowchart LR
 
   P -->|"Write Outputs"| O["backend/outputs"]
   A -->|"Download & Preview"| U
-  A -->|"Optional"| S3["S3 Bucket"]
+  %% Optional S3 flow
+  U -. "Presigned PUT" .-> S3["S3 Bucket"]
+  A -. "Download on s3:// input" .-> S3
 ```
 
 ### LangGraph 처리 흐름(핵심)

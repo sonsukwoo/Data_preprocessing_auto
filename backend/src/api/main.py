@@ -222,6 +222,41 @@ def _cleanup_old_uploads(now_ts: float) -> int:
     return deleted
 
 
+def _cleanup_old_outputs(now_ts: float) -> int:
+    """OUTPUT_DIR 아래의 오래된 산출물(파일/폴더)을 TTL 기준으로 정리."""
+    ttl = _run_ttl_seconds()
+    deleted = 0
+    root = OUTPUT_DIR.resolve()
+    if not root.exists():
+        return 0
+    try:
+        for item in root.iterdir():
+            # 업로드 폴더/스테이징 폴더는 별도 정리
+            if item.name in {"uploads", "_staging"}:
+                continue
+            try:
+                resolved = item.resolve()
+                resolved.relative_to(root)
+            except Exception:
+                continue
+            latest = _latest_mtime(resolved)
+            if latest <= 0:
+                continue
+            if (now_ts - latest) <= ttl:
+                continue
+            try:
+                if resolved.is_dir():
+                    shutil.rmtree(resolved, ignore_errors=True)
+                else:
+                    resolved.unlink(missing_ok=True)
+                deleted += 1
+            except Exception:
+                continue
+    except Exception:
+        return deleted
+    return deleted
+
+
 @app.on_event("startup")
 async def _start_cleanup_task() -> None:
     async def _loop():
@@ -229,6 +264,7 @@ async def _start_cleanup_task() -> None:
         while True:
             try:
                 _cleanup_expired_runs(time.time())
+                _cleanup_old_outputs(time.time())
                 _cleanup_old_uploads(time.time())
             except Exception:
                 # cleanup should never crash the server
