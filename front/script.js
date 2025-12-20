@@ -13,6 +13,8 @@ const uploadStatus = $("upload-status");
 const fileSummary = $("file-summary");
 const dropzone = $("dropzone");
 const outputFormatSelect = $("output_format");
+const llmModelSelect = $("llm_model");
+const coderModelSelect = $("coder_model");
 const refactorCountInlineEl = $("refactor-count-inline");
 const refactorDetailsEl = $("refactor-details");
 const refactorEventsEl = $("refactor-events");
@@ -422,6 +424,10 @@ form.addEventListener("submit", async (e) => {
       max_iterations: Number($("max_iterations").value) || 3,
       output_format: outputFormatSelect.value,
     };
+    const llmModel = llmModelSelect?.value?.trim();
+    if (llmModel) payload.llm_model = llmModel;
+    const coderModel = coderModelSelect?.value?.trim();
+    if (coderModel) payload.coder_model = coderModel;
 
     let data;
     try {

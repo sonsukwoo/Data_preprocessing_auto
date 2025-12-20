@@ -3,12 +3,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import math
 import os
-import re
-import shutil
 import traceback
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict
@@ -17,177 +13,37 @@ from uuid import uuid4
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from .models import CodeBlocks, Requirement, State
+from .models import CodeBlocks, State
 from .prompts import code_gen_prompt, reflect_prompt
 from .tools import inspect_input, list_images_to_csv, sample_table, summarize_table, load_and_sample
-from .trace_utils import diff_generation, write_internal_trace_markdown
-
-# ==================================== 유틸: 공용 유틸 함수 영역 =====================
-def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def _append_trace(state: State | dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
-    existing = None
-    if isinstance(state, dict):
-        existing = state.get("trace")
-    else:
-        existing = getattr(state, "trace", None)
-    trace = list(existing or [])
-    trace.append(event)
-    return {"trace": trace}
-
-
-def _safe_last_message(messages: list[Any]) -> str:
-    try:
-        return _extract_last_message_text(messages)
-    except Exception:
-        return ""
-
-
-def _extract_user_request(messages: list[Any]) -> str:
-    if not messages:
-        return ""
-    first = messages[0]
-    if isinstance(first, tuple):
-        return first[1]
-    if hasattr(first, "content"):
-        return getattr(first, "content", "")
-    return ""
-
-
-def _extract_last_message_text(messages: list[Any]) -> str:
-    if not messages:
-        return ""
-    last = messages[-1]
-    if isinstance(last, tuple) and len(last) >= 2:
-        return str(last[1])
-    if hasattr(last, "content"):
-        return str(getattr(last, "content", ""))
-    return str(last)
-
-
-def _truncate_text(s: str, limit: int = 4000) -> str:
-    if len(s) <= limit:
-        return s
-    return s[:limit] + "\n…(truncated)"
-
-
-def _safe_format_json_like(obj: object, limit: int = 6000) -> str:
-    """디버그 메시지용 안전한 포맷팅(최대한 시도하며, 예외를 발생시키지 않음)."""
-    try:
-        return _truncate_text(json.dumps(obj, ensure_ascii=False, indent=2), limit=limit)
-    except Exception as exc:  # noqa: BLE001
-        return _truncate_text(f"<non-json-serializable: {type(exc).__name__}: {exc}>\n{repr(obj)}", limit=limit)
-
-
-
-
-def _outputs_root_dir() -> Path:
-    # backend/src/data_preprocessing/workflow.py 기준 parents[2] == backend/
-    return Path(__file__).resolve().parents[2] / "outputs"
-
-
-def _cleanup_dir(path: Path) -> None:
-    try:
-        shutil.rmtree(path, ignore_errors=True)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _promote_staged_outputs(execution_workdir: Path) -> list[str]:
-    """execution_workdir 아래에서 생성된 ./outputs를 backend/outputs로 옮기고, 옮긴 파일명을 반환."""
-    src = execution_workdir / "outputs"
-    if not src.exists():
-        return []
-
-    dst_root = _outputs_root_dir()
-    dst_root.mkdir(parents=True, exist_ok=True)
-
-    moved: list[str] = []
-    for item in src.iterdir():
-        target = dst_root / item.name
-        if target.exists():
-            # 충돌 방지: 기존 파일을 보존하고 새 파일명을 부여
-            target = dst_root / f"{item.stem}_{uuid4().hex[:8]}{item.suffix}"
-        shutil.move(str(item), str(target))
-        moved.append(target.name)
-    return moved
-
-def _strip_paths_and_quotes(text: str) -> str:
-    # 실행 가능한 요구사항이 아닌, 명백한 파일 경로/주소(URI) 토큰을 제거
-    s = text
-    s = re.sub(r"s3://\S+", " ", s)
-    # 주의: 과도하게 제거하지 않도록 보수적으로 처리(경로처럼 보이는 토큰만 제거)
-    s = re.sub(r"(?:[A-Za-z]:\\|/)\S+", " ", s)
-    s = s.replace('"', " ").replace("'", " ")
-    return s
-
-
-def _extract_requirements_from_user_request(user_request: str, max_items: int = 10) -> list[Requirement]:
-    """요구사항 누락(silent miss)을 줄이기 위한, 규칙 기반(결정적) 요구사항 추출(best-effort).
-
-    토큰 사용을 줄이기 위해 의도적으로 단순하게 유지(추가 LLM 호출 없음).
-    """
-    text = (user_request or "").strip()
-    if not text:
-        return []
-
-    text = _strip_paths_and_quotes(text)
-    # 흔한 구분자(한글 접속사 + 구두점)로 분리
-    parts = re.split(r"[\n\r]+|[.;!?]+|,|\b그리고\b|\b및\b|\b또는\b|\b또\b|\b또한\b|\b추가로\b", text)
-    cleaned: list[str] = []
-    for p in parts:
-        t = re.sub(r"\s+", " ", p).strip()
-        if len(t) < 2:
-            continue
-        cleaned.append(t)
-
-    # 순서를 유지하면서 중복 제거
-    uniq: list[str] = []
-    seen: set[str] = set()
-    for t in cleaned:
-        key = t.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(t)
-        if len(uniq) >= max_items:
-            break
-
-    return [Requirement(id=f"REQ-{i+1}", text=t, severity="must") for i, t in enumerate(uniq)]
-
-
-def _detect_sample_fallback(code: str) -> str | None:
-    """샘플 데이터 생성/폴백 로직을 휴리스틱으로 감지."""
-    if not code:
-        return None
-    lower = code.lower()
-    if "sample_data" in lower:
-        return "sample_data variable found"
-    if "create a sample dataframe" in lower:
-        return "sample dataframe comment"
-    lines = code.splitlines()
-    for i, line in enumerate(lines):
-        line_lower = line.lower()
-        if "if not" in line_lower and "exists(" in line_lower:
-            window = "\n".join(lines[i : i + 15]).lower()
-            if "pd.dataframe" in window or "sample_data" in window:
-                return "pd.DataFrame created under missing-file guard"
-    return None
+from .common_utils import (
+    append_trace,
+    cleanup_dir,
+    detect_sample_fallback,
+    extract_last_message_text,
+    extract_requirements_from_user_request,
+    extract_user_request,
+    now_iso,
+    outputs_root_dir,
+    promote_staged_outputs,
+    safe_format_json_like,
+    safe_last_message,
+    diff_generation,
+    write_internal_trace_markdown,
+)
 
 
 def add_requirements(state: State):
     """사용자 요청에서 요구사항을 뽑아 state에 저장."""
     user_request = state.get("user_request", "")
-    reqs = _extract_requirements_from_user_request(user_request)
+    reqs = extract_requirements_from_user_request(user_request)
     return {
         "requirements": reqs,
         "phase": "analyzing",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "add_requirements",
                 "phase": "analyzing",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -196,9 +52,6 @@ def add_requirements(state: State):
             },
         ),
     }
-# ============================= 유틸 끝 ==========================================
-
-
 
 # ========================== 노드 함수: 실제 작업을 수행하는 노드 정의 ==================================
 # chatbot: 첫 LLM 호출 + 툴 호출 유도, 사용자 요청 저장
@@ -211,15 +64,15 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI):
         "Otherwise, you can call `sample_table` and then `summarize_table`."
     )
     response = llm_with_tools.invoke([("system", system), *state["messages"]])
-    user_req = state.get("user_request") or _extract_user_request(state.get("messages", []))
+    user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
     return {
         "messages": [response],
         "user_request": user_req,
         "phase": "analyzing",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "chatbot",
                 "phase": "analyzing",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -295,10 +148,10 @@ def add_context(state: State):
         "context": context_str,
         "user_request": user_request,
         "phase": "sampling",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "add_context",
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -331,10 +184,10 @@ def friendly_error(state: State, llm_gpt: ChatOpenAI):
         "final_user_messages": [("assistant", resp.content)],
         "error": "yes",
         "phase": "finalizing",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "friendly_error",
                 "phase": "finalizing",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -350,7 +203,7 @@ def final_friendly_error(state: State, llm_gpt: ChatOpenAI):
     """최종 실패 시점의 에러를 비개발자용 한글 요약으로 변환."""
 
     user_request = state.get("user_request", "")
-    raw_error = _extract_last_message_text(state.get("messages", []))
+    raw_error = extract_last_message_text(state.get("messages", []))
     # 프롬프트가 너무 커지는 것을 방지(스택 트레이스는 매우 길 수 있음)
     raw_error = raw_error[-4000:] if isinstance(raw_error, str) else str(raw_error)
 
@@ -366,10 +219,10 @@ def final_friendly_error(state: State, llm_gpt: ChatOpenAI):
         "final_user_messages": [("assistant", resp.content)],
         "error": "yes",
         "phase": "finalizing",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "final_friendly_error",
                 "phase": "finalizing",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -411,10 +264,10 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
         "generation": code_solution,
         "messages": messages,
         "phase": "generating",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "generate",
                 "phase": "generating",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -433,7 +286,7 @@ def code_check(state: State):
     imports = code_solution.imports
     code = code_solution.code
 
-    sample_fallback_reason = _detect_sample_fallback(code)
+    sample_fallback_reason = detect_sample_fallback(code)
     if sample_fallback_reason:
         error_detail = (
             "샘플 데이터 생성(폴백) 로직이 감지되어 실행을 중단합니다. "
@@ -447,10 +300,10 @@ def code_check(state: State):
             "error": "yes",
             "phase": "executing",
             "execution_stdout": "",
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "code_check",
                     "phase": "executing",
                     "iterations": int(state.get("iterations", 0) or 0),
@@ -465,7 +318,7 @@ def code_check(state: State):
     stdout_buffer = io.StringIO()
     exec_globals: Dict[str, Any] = {}
     prev_cwd = os.getcwd()
-    staging_root = _outputs_root_dir() / "_staging"
+    staging_root = outputs_root_dir() / "_staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     execution_workdir = staging_root / f"run_{uuid4().hex}"
     execution_workdir.mkdir(parents=True, exist_ok=True)
@@ -475,7 +328,7 @@ def code_check(state: State):
             exec(imports + "\n" + code, exec_globals)
     except SystemExit as exc:
         os.chdir(prev_cwd)
-        _cleanup_dir(execution_workdir)
+        cleanup_dir(execution_workdir)
         captured = stdout_buffer.getvalue()
         error_detail = captured + "\n" + f"SystemExit: {getattr(exc, 'code', exc)}\n" + traceback.format_exc()
         error_message = [("user", f"Your solution called exit() during execution (this is not allowed): {error_detail}")]
@@ -485,10 +338,10 @@ def code_check(state: State):
             "error": "yes",
             "phase": "executing",
             "execution_stdout": captured,
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "code_check",
                     "phase": "executing",
                     "iterations": int(state.get("iterations", 0) or 0),
@@ -504,7 +357,7 @@ def code_check(state: State):
         if isinstance(exc, KeyboardInterrupt):
             raise
         os.chdir(prev_cwd)
-        _cleanup_dir(execution_workdir)
+        cleanup_dir(execution_workdir)
         captured = stdout_buffer.getvalue()
         error_detail = captured + "\n" + traceback.format_exc()
         error_message = [("user", f"Your solution failed during execution: {error_detail}")]
@@ -514,10 +367,10 @@ def code_check(state: State):
             "error": "yes",
             "phase": "executing",
             "execution_stdout": captured,
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "code_check",
                     "phase": "executing",
                     "iterations": int(state.get("iterations", 0) or 0),
@@ -547,10 +400,10 @@ def code_check(state: State):
         "execution_stdout": output_preview,
         "validation_report": validation_report if isinstance(validation_report, dict) else None,
         "execution_workdir": str(execution_workdir),
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "code_check",
                 "phase": "executing",
                 "iterations": int(state.get("iterations", 0) or 0),
@@ -573,7 +426,7 @@ def validate(state: State):
     # 생성 스크립트가 validation report를 만들지 못하면, 강제로 수정(reflect) 루프로 보낸다.
     if not isinstance(report, dict):
         if execution_workdir:
-            _cleanup_dir(execution_workdir)
+            cleanup_dir(execution_workdir)
         stdout_tail = (state.get("execution_stdout") or "")[-2000:]
         error_message = [
             (
@@ -587,45 +440,45 @@ def validate(state: State):
             "messages": error_message,
             "error": "yes",
             "phase": "validating",
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "validate",
                     "phase": "validating",
                     "iterations": int(state.get("iterations", 0) or 0),
                     "error": "yes",
                     "validation_report": report,
                     "execution_stdout_tail": stdout_tail,
-                    "last_message": _safe_last_message(state.get("messages", [])),
+                    "last_message": safe_last_message(state.get("messages", [])),
                 },
             ),
         }
 
     if "ok" not in report or "issues" not in report:
         if execution_workdir:
-            _cleanup_dir(execution_workdir)
+            cleanup_dir(execution_workdir)
         error_message = [
             (
                 "user",
                 "Validation failed: __validation_report__ must include keys 'ok' and 'issues'.\n"
-                f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=3000)}",
+                f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=3000)}",
             )
         ]
         return {
             "messages": error_message,
             "error": "yes",
             "phase": "validating",
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "validate",
                     "phase": "validating",
                     "iterations": int(state.get("iterations", 0) or 0),
                     "error": "yes",
                     "validation_report": report,
-                    "last_message": _safe_last_message(state.get("messages", [])),
+                    "last_message": safe_last_message(state.get("messages", [])),
                 },
             ),
         }
@@ -636,28 +489,28 @@ def validate(state: State):
     metrics = report.get("metrics")
     if ok is True and not isinstance(metrics, dict):
         if execution_workdir:
-            _cleanup_dir(execution_workdir)
+            cleanup_dir(execution_workdir)
         error_message = [
             (
                 "user",
                 "Validation failed: __validation_report__ must include a dict 'metrics' to justify ok=True.\n"
-                f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=3000)}",
+                f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=3000)}",
             )
         ]
         return {
             "messages": error_message,
             "error": "yes",
             "phase": "validating",
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "validate",
                     "phase": "validating",
                     "iterations": int(state.get("iterations", 0) or 0),
                     "error": "yes",
                     "validation_report": report,
-                    "last_message": _safe_last_message(state.get("messages", [])),
+                    "last_message": safe_last_message(state.get("messages", [])),
                 },
             ),
         }
@@ -670,7 +523,7 @@ def validate(state: State):
 
         if not isinstance(report_reqs, dict):
             if execution_workdir:
-                _cleanup_dir(execution_workdir)
+                cleanup_dir(execution_workdir)
             req_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs])
             msg = (
                 "Validation failed: missing __validation_report__['requirements'].\n"
@@ -681,10 +534,10 @@ def validate(state: State):
                 "messages": [("user", msg)],
                 "error": "yes",
                 "phase": "validating",
-                **_append_trace(
+                **append_trace(
                     state,
                     {
-                        "ts": _now_iso(),
+                        "ts": now_iso(),
                         "node": "validate",
                         "phase": "validating",
                         "iterations": int(state.get("iterations", 0) or 0),
@@ -713,7 +566,7 @@ def validate(state: State):
 
         if missing_ids or failed_ids:
             if execution_workdir:
-                _cleanup_dir(execution_workdir)
+                cleanup_dir(execution_workdir)
             req_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs])
             msg = (
                 "Validation failed: user requirements not satisfied.\n"
@@ -721,16 +574,16 @@ def validate(state: State):
                 f"Failed requirement ids: {failed_ids}\n"
                 "All requirements (must satisfy):\n"
                 f"{req_list}\n"
-                f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=4000)}"
+                f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=4000)}"
             )
             return {
                 "messages": [("user", msg)],
                 "error": "yes",
                 "phase": "validating",
-                **_append_trace(
+                **append_trace(
                     state,
                     {
-                        "ts": _now_iso(),
+                        "ts": now_iso(),
                         "node": "validate",
                         "phase": "validating",
                         "iterations": int(state.get("iterations", 0) or 0),
@@ -763,21 +616,21 @@ def validate(state: State):
 
         if ok is True and missing_placeholder_metrics:
             if execution_workdir:
-                _cleanup_dir(execution_workdir)
+                cleanup_dir(execution_workdir)
             msg = (
                 "Validation failed: ok=True but placeholder/fallback coverage metrics are missing.\n"
                 "For each filled/added column, include '<col>_placeholder' (or '<col>_fallback') and set ok=False when it > 0.\n"
                 f"Columns requiring placeholder metrics: {missing_placeholder_metrics}\n"
-                f"__validation_report__ (truncated):\n{_safe_format_json_like(report, limit=3000)}"
+                f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=3000)}"
             )
             return {
                 "messages": [("user", msg)],
                 "error": "yes",
                 "phase": "validating",
-                **_append_trace(
+                **append_trace(
                     state,
                     {
-                        "ts": _now_iso(),
+                        "ts": now_iso(),
                         "node": "validate",
                         "phase": "validating",
                         "iterations": int(state.get("iterations", 0) or 0),
@@ -802,19 +655,19 @@ def validate(state: State):
         moved = []
         if execution_workdir:
             try:
-                moved = _promote_staged_outputs(execution_workdir)
+                moved = promote_staged_outputs(execution_workdir)
             finally:
-                _cleanup_dir(execution_workdir)
+                cleanup_dir(execution_workdir)
         if moved:
             return {
                 "error": "no",
                 "phase": "validating",
                 "output_files": moved,
                 "messages": [("user", f"Outputs promoted: {moved}")],
-                **_append_trace(
+                **append_trace(
                     state,
                     {
-                        "ts": _now_iso(),
+                        "ts": now_iso(),
                         "node": "validate",
                         "phase": "validating",
                         "iterations": int(state.get("iterations", 0) or 0),
@@ -828,10 +681,10 @@ def validate(state: State):
             "error": "no",
             "phase": "validating",
             "output_files": [],
-            **_append_trace(
+            **append_trace(
                 state,
                 {
-                    "ts": _now_iso(),
+                    "ts": now_iso(),
                     "node": "validate",
                     "phase": "validating",
                     "iterations": int(state.get("iterations", 0) or 0),
@@ -856,7 +709,7 @@ def validate(state: State):
     if metric_flags:
         issues_list = issues_list + [f"metrics indicate potential silent miss: {x}" for x in metric_flags]
 
-    report_json = _safe_format_json_like(report, limit=6000)
+    report_json = safe_format_json_like(report, limit=6000)
     issue_text = "\n".join(f"- {x}" for x in issues_list) if issues_list else "(no issues list provided)"
     error_message = [
         (
@@ -867,21 +720,21 @@ def validate(state: State):
         )
     ]
     if execution_workdir:
-        _cleanup_dir(execution_workdir)
+        cleanup_dir(execution_workdir)
     return {
         "messages": error_message,
         "error": "yes",
         "phase": "validating",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "validate",
                 "phase": "validating",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "error": "yes",
                 "validation_report": report,
-                "last_message": _safe_last_message(state.get("messages", [])),
+                "last_message": safe_last_message(state.get("messages", [])),
             },
         ),
     }
@@ -890,7 +743,7 @@ def validate(state: State):
 # reflect: 실행 오류를 기반으로 수정 코드 재생성
 def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     """에러 발생 시 수정 코드 생성."""
-    error = _extract_last_message_text(state.get("messages", []))
+    error = extract_last_message_text(state.get("messages", []))
     code_solution = state["generation"]
     code_solution_str = (
         f"Imports: {code_solution.imports} \n Code: {code_solution.code}"
@@ -920,10 +773,10 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
         "messages": messages,
         "iterations": state["iterations"] + 1,
         "phase": "refactoring",
-        **_append_trace(
+        **append_trace(
             state,
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "node": "reflect",
                 "phase": "refactoring",
                 "iterations": int(state.get("iterations", 0) or 0) + 1,
@@ -1075,6 +928,8 @@ def run_request(
         "output_formats": output_formats,
         "final_user_messages": None,
         "trace": [],
+        "llm_model": llm_model,
+        "coder_model": coder_model,
     }
     result = graph.invoke(initial_state)
     if isinstance(result, dict):

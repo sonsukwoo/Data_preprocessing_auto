@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>데이터 전처리 에이전트</title>
-    <link rel="stylesheet" href="style.css?v=20251220-4" />
+    <link rel="stylesheet" href="style.css?v=20251220-6" />
   </head>
   <body>
     <header class="topbar">
@@ -35,6 +35,27 @@
               <option value="huggingface">HuggingFace Dataset</option>
             </select>
           </label>
+
+          <div class="grid">
+            <label>
+              대화 모델
+              <select id="llm_model">
+                <option value="gpt-4.1-nano">빠름 (gpt-4.1-nano)</option>
+                <option value="gpt-4o-mini" selected>기본 (gpt-4o-mini)</option>
+                <option value="gpt-4o">정확도↑ (gpt-4o)</option>
+              </select>
+            </label>
+
+            <label>
+              코드 생성 모델
+              <select id="coder_model">
+                <option value="gpt-4.1-mini">빠름·가성비 (gpt-4.1-mini)</option>
+                <option value="gpt-4.1" selected>기본 (gpt-4.1)</option>
+                <option value="gpt-5.1">정확도↑ (gpt-5.1)</option>
+              </select>
+            </label>
+          </div>
+          <span class="muted">대화 모델과 코드 생성 모델을 각각 선택할 수 있습니다.</span>
 
           <div class="dropzone" id="dropzone">
             <input type="file" id="file-input" multiple webkitdirectory />
@@ -105,6 +126,6 @@
     </main>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="script.js?v=20251220-2"></script>
+    <script src="script.js?v=20251220-5"></script>
   </body>
 </html>

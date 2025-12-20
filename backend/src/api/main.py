@@ -35,6 +35,20 @@ ensure_api_keys(ROOT_DIR / ".env")
 
 app = FastAPI(title="Data Preprocessing Agent API", version="0.1.0")
 
+# 모델 선택 허용 리스트 (프론트 옵션과 동일하게 유지)
+DEFAULT_LLM_MODEL = "gpt-4o-mini"
+DEFAULT_CODER_MODEL = "gpt-4.1"
+ALLOWED_LLM_MODELS = {
+    "gpt-4.1-nano",
+    "gpt-4o-mini",
+    "gpt-4o",
+}
+ALLOWED_CODER_MODELS = {
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "gpt-5.1",
+}
+
 # 프론트엔드가 file:// 혹은 다른 포트에서 접근할 수 있으므로 와일드카드 허용
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +66,8 @@ class RunRequest(BaseModel):
         None,
         description="저장 형식 지정 (csv, parquet, feather, json, xlsx, huggingface 중 하나)",
     )
+    llm_model: str | None = Field(None, description="대화/툴 호출에 사용할 모델명")
+    coder_model: str | None = Field(None, description="코드 생성/수정에 사용할 모델명")
 
 
 class Message(BaseModel):
@@ -116,6 +132,20 @@ def _get_run_outputs(run_id: str) -> Tuple[float, List[str]] | None:
     if not isinstance(created_at, (int, float)) or not isinstance(files, list):
         return None
     return float(created_at), [Path(str(f)).name for f in files if str(f).strip()]
+
+
+def _normalize_model(value: str | None, allowed: set[str], default: str, field_name: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        candidate = value.strip()
+    else:
+        candidate = str(value).strip()
+    if not candidate:
+        return default
+    if candidate not in allowed:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 {field_name}: {candidate}")
+    return candidate
 
 
 def _cleanup_expired_runs(now_ts: float) -> int:
@@ -654,11 +684,15 @@ def run(body: RunRequest) -> RunResponse:
 
     rewritten_question = _maybe_download_s3_and_rewrite_question(body.question)
     output_formats = _normalize_output_format(body.output_format)
+    llm_model = _normalize_model(body.llm_model, ALLOWED_LLM_MODELS, DEFAULT_LLM_MODEL, "llm_model")
+    coder_model = _normalize_model(body.coder_model, ALLOWED_CODER_MODELS, DEFAULT_CODER_MODEL, "coder_model")
     try:
         result = run_request(
             request=rewritten_question,
             max_iterations=body.max_iterations,
             output_formats=output_formats,
+            llm_model=llm_model,
+            coder_model=coder_model,
         )
     except SystemExit as exc:
         # Generated code may accidentally call exit(); do not crash the API process.
@@ -684,9 +718,11 @@ def run_stream(body: RunRequest) -> StreamingResponse:
 
     output_formats = _normalize_output_format(body.output_format)
     rewritten_question = _maybe_download_s3_and_rewrite_question(body.question)
+    llm_model = _normalize_model(body.llm_model, ALLOWED_LLM_MODELS, DEFAULT_LLM_MODEL, "llm_model")
+    coder_model = _normalize_model(body.coder_model, ALLOWED_CODER_MODELS, DEFAULT_CODER_MODEL, "coder_model")
 
     def _iter_ndjson():
-        graph = build_graph(max_iterations=body.max_iterations)
+        graph = build_graph(llm_model=llm_model, coder_model=coder_model, max_iterations=body.max_iterations)
         run_id = uuid4().hex
         initial_state: Dict[str, Any] = {
             "run_id": run_id,
@@ -700,6 +736,8 @@ def run_stream(body: RunRequest) -> StreamingResponse:
             "output_formats": output_formats,
             "final_user_messages": None,
             "trace": [],
+            "llm_model": llm_model,
+            "coder_model": coder_model,
         }
 
         last_iterations = 0

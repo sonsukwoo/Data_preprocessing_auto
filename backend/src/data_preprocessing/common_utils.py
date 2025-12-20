@@ -1,22 +1,173 @@
 from __future__ import annotations
 
-import json
 import difflib
+import json
+import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from .models import Requirement, State
 
-def _now_iso() -> str:
+# ========================== 시간/경로 유틸 ==========================
+def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _outputs_root_dir() -> Path:
-    # backend/src/data_preprocessing/trace_utils.py 기준 parents[2] == backend/
+def outputs_root_dir() -> Path:
+    # backend/src/data_preprocessing/common_utils.py 기준 parents[2] == backend/
     return Path(__file__).resolve().parents[2] / "outputs"
 
+# ========================== Trace/메시지 유틸 ==========================
+def append_trace(state: State | dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    existing = None
+    if isinstance(state, dict):
+        existing = state.get("trace")
+    else:
+        existing = getattr(state, "trace", None)
+    trace = list(existing or [])
+    trace.append(event)
+    return {"trace": trace}
 
-def _generation_to_text(gen: object) -> str:
+
+def extract_last_message_text(messages: list[Any]) -> str:
+    if not messages:
+        return ""
+    last = messages[-1]
+    if isinstance(last, tuple) and len(last) >= 2:
+        return str(last[1])
+    if hasattr(last, "content"):
+        return str(getattr(last, "content", ""))
+    return str(last)
+
+
+def safe_last_message(messages: list[Any]) -> str:
+    try:
+        return extract_last_message_text(messages)
+    except Exception:
+        return ""
+
+
+def extract_user_request(messages: list[Any]) -> str:
+    if not messages:
+        return ""
+    first = messages[0]
+    if isinstance(first, tuple):
+        return first[1]
+    if hasattr(first, "content"):
+        return getattr(first, "content", "")
+    return ""
+
+# ========================== 포맷/텍스트 유틸 ==========================
+def truncate_text(s: str, limit: int = 4000) -> str:
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "\n…(truncated)"
+
+
+def safe_format_json_like(obj: object, limit: int = 6000) -> str:
+    """디버그 메시지용 안전한 포맷팅(최대한 시도하며, 예외를 발생시키지 않음)."""
+    try:
+        return truncate_text(json.dumps(obj, ensure_ascii=False, indent=2), limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return truncate_text(f"<non-json-serializable: {type(exc).__name__}: {exc}>\n{repr(obj)}", limit=limit)
+
+
+def strip_paths_and_quotes(text: str) -> str:
+    # 실행 가능한 요구사항이 아닌, 명백한 파일 경로/주소(URI) 토큰을 제거
+    s = text
+    s = re.sub(r"s3://\S+", " ", s)
+    # 주의: 과도하게 제거하지 않도록 보수적으로 처리(경로처럼 보이는 토큰만 제거)
+    s = re.sub(r"(?:[A-Za-z]:\\|/)\S+", " ", s)
+    s = s.replace('"', " ").replace("'", " ")
+    return s
+
+
+def extract_requirements_from_user_request(user_request: str, max_items: int = 10) -> list[Requirement]:
+    """요구사항 누락(silent miss)을 줄이기 위한, 규칙 기반(결정적) 요구사항 추출(best-effort).
+
+    토큰 사용을 줄이기 위해 의도적으로 단순하게 유지(추가 LLM 호출 없음).
+    """
+    text = (user_request or "").strip()
+    if not text:
+        return []
+
+    text = strip_paths_and_quotes(text)
+    # 흔한 구분자(한글 접속사 + 구두점)로 분리
+    parts = re.split(r"[\n\r]+|[.;!?]+|,|\b그리고\b|\b및\b|\b또는\b|\b또\b|\b또한\b|\b추가로\b", text)
+    cleaned: list[str] = []
+    for p in parts:
+        t = re.sub(r"\s+", " ", p).strip()
+        if len(t) < 2:
+            continue
+        cleaned.append(t)
+
+    # 순서를 유지하면서 중복 제거
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for t in cleaned:
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(t)
+        if len(uniq) >= max_items:
+            break
+
+    return [Requirement(id=f"REQ-{i+1}", text=t, severity="must") for i, t in enumerate(uniq)]
+
+
+def detect_sample_fallback(code: str) -> str | None:
+    """샘플 데이터 생성/폴백 로직을 휴리스틱으로 감지."""
+    if not code:
+        return None
+    lower = code.lower()
+    if "sample_data" in lower:
+        return "sample_data variable found"
+    if "create a sample dataframe" in lower:
+        return "sample dataframe comment"
+    lines = code.splitlines()
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if "if not" in line_lower and "exists(" in line_lower:
+            window = "\n".join(lines[i : i + 15]).lower()
+            if "pd.dataframe" in window or "sample_data" in window:
+                return "pd.DataFrame created under missing-file guard"
+    return None
+
+
+# ========================== 파일/출력 유틸 ==========================
+def cleanup_dir(path: Path) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def promote_staged_outputs(execution_workdir: Path) -> list[str]:
+    """execution_workdir 아래에서 생성된 ./outputs를 backend/outputs로 옮기고, 옮긴 파일명을 반환."""
+    src = execution_workdir / "outputs"
+    if not src.exists():
+        return []
+
+    dst_root = outputs_root_dir()
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    moved: list[str] = []
+    for item in src.iterdir():
+        target = dst_root / item.name
+        if target.exists():
+            # 충돌 방지: 기존 파일을 보존하고 새 파일명을 부여
+            target = dst_root / f"{item.stem}_{uuid4().hex[:8]}{item.suffix}"
+        shutil.move(str(item), str(target))
+        moved.append(target.name)
+    return moved
+
+
+# ========================== 코드/변경 유틸 ==========================
+def generation_to_text(gen: object) -> str:
     if gen is None:
         return ""
     if isinstance(gen, dict):
@@ -29,8 +180,8 @@ def _generation_to_text(gen: object) -> str:
 
 
 def diff_generation(prev: object, nxt: object) -> tuple[str, dict[str, int]]:
-    prev_text = _generation_to_text(prev)
-    next_text = _generation_to_text(nxt)
+    prev_text = generation_to_text(prev)
+    next_text = generation_to_text(nxt)
     diff_lines = list(
         difflib.unified_diff(
             prev_text.splitlines(),
@@ -53,6 +204,7 @@ def diff_generation(prev: object, nxt: object) -> tuple[str, dict[str, int]]:
     return "\n".join(diff_lines), summary
 
 
+# ========================== 내부 기록(Trace) 작성 ==========================
 def write_internal_trace_markdown(state: dict[str, Any]) -> str | None:
     """누적된 trace를 Markdown 파일로 backend/outputs에 저장하고 파일명을 반환."""
     trace = state.get("trace") or []
@@ -63,7 +215,7 @@ def write_internal_trace_markdown(state: dict[str, Any]) -> str | None:
     if not run_id:
         return None
 
-    out_dir = _outputs_root_dir()
+    out_dir = outputs_root_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = f"run_{run_id}_internal_trace_내부기록.md"
     path = (out_dir / filename).resolve()
@@ -169,7 +321,7 @@ def write_internal_trace_markdown(state: dict[str, Any]) -> str | None:
     lines.append("# 내부 기록 (Internal Trace)")
     lines.append("")
     lines.append(f"- run_id: `{run_id}`")
-    lines.append(f"- created_at: `{_now_iso()}`")
+    lines.append(f"- created_at: `{now_iso()}`")
     lines.append(f"- output_formats: `{state.get('output_formats')}`")
     reflect_events = [ev for ev in trace if isinstance(ev, dict) and ev.get("node") == "reflect"]
     lines.append(f"- reflect_count: `{len(reflect_events)}`")
@@ -352,4 +504,20 @@ def write_internal_trace_markdown(state: dict[str, Any]) -> str | None:
     return filename
 
 
-__all__ = ["diff_generation", "write_internal_trace_markdown"]
+__all__ = [
+    "append_trace",
+    "cleanup_dir",
+    "detect_sample_fallback",
+    "diff_generation",
+    "extract_last_message_text",
+    "extract_requirements_from_user_request",
+    "extract_user_request",
+    "now_iso",
+    "outputs_root_dir",
+    "promote_staged_outputs",
+    "safe_format_json_like",
+    "safe_last_message",
+    "strip_paths_and_quotes",
+    "truncate_text",
+    "write_internal_trace_markdown",
+]
