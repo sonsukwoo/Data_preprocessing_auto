@@ -92,6 +92,7 @@ docker compose down
 
 ### 전체 구성
 
+```mermaid
 flowchart LR
   U[User (Browser)] -->|HTTP :8080| N[Nginx (front)]
   N -->|/api/* proxy| A[FastAPI (backend :8000)]
@@ -101,6 +102,7 @@ flowchart LR
   P -->|write outputs| O[(backend/outputs)]
   A -->|downloads + preview| U
   A -->|optional| S3[(S3 bucket)]
+```
 
 ### LangGraph 처리 흐름(핵심)
 
