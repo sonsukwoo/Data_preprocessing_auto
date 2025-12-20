@@ -194,10 +194,6 @@ function renderResult(data) {
       const isMarkdown = name.toLowerCase().endsWith(".md");
       const isInternalTrace = name.toLowerCase().includes("internal_trace");
       if (isMarkdown || isInternalTrace) {
-        const note = document.createElement("div");
-        note.className = "preview muted";
-        note.textContent = "미리보기 없음(문서 파일)";
-        li.appendChild(note);
         downloadsEl.appendChild(li);
         return;
       }
@@ -208,7 +204,7 @@ function renderResult(data) {
       li.appendChild(previewWrap);
       downloadsEl.appendChild(li);
 
-      const previewUrl = `${API_BASE}/downloads/${encodeURIComponent(runId)}/${encodeURIComponent(name)}/preview?n=5`;
+      const previewUrl = `${API_BASE}/downloads/${encodeURIComponent(runId)}/${encodeURIComponent(name)}/preview?n=20`;
       fetch(previewUrl)
         .then((r) => {
           if (!r.ok) return r.text().then((t) => { throw new Error(t || r.statusText); });
@@ -234,7 +230,7 @@ function renderResult(data) {
           table.appendChild(thead);
 
           const tbody = document.createElement("tbody");
-          rows.slice(0, 5).forEach((row) => {
+          rows.slice(0, 20).forEach((row) => {
             const tr = document.createElement("tr");
             cols.forEach((c) => {
               const td = document.createElement("td");

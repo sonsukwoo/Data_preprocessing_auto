@@ -19,7 +19,8 @@ from langgraph.graph import END, START, StateGraph
 
 from .models import CodeBlocks, Requirement, State
 from .prompts import code_gen_prompt, reflect_prompt
-from .tools import list_images_to_csv, load_and_sample
+from .tools import inspect_input, list_images_to_csv, sample_table, summarize_table, load_and_sample
+from .trace_utils import diff_generation, write_internal_trace_markdown
 
 # ==================================== 유틸: 공용 유틸 함수 영역 =====================
 def _now_iso() -> str:
@@ -78,6 +79,8 @@ def _safe_format_json_like(obj: object, limit: int = 6000) -> str:
         return _truncate_text(json.dumps(obj, ensure_ascii=False, indent=2), limit=limit)
     except Exception as exc:  # noqa: BLE001
         return _truncate_text(f"<non-json-serializable: {type(exc).__name__}: {exc}>\n{repr(obj)}", limit=limit)
+
+
 
 
 def _outputs_root_dir() -> Path:
@@ -155,6 +158,25 @@ def _extract_requirements_from_user_request(user_request: str, max_items: int = 
     return [Requirement(id=f"REQ-{i+1}", text=t, severity="must") for i, t in enumerate(uniq)]
 
 
+def _detect_sample_fallback(code: str) -> str | None:
+    """샘플 데이터 생성/폴백 로직을 휴리스틱으로 감지."""
+    if not code:
+        return None
+    lower = code.lower()
+    if "sample_data" in lower:
+        return "sample_data variable found"
+    if "create a sample dataframe" in lower:
+        return "sample dataframe comment"
+    lines = code.splitlines()
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if "if not" in line_lower and "exists(" in line_lower:
+            window = "\n".join(lines[i : i + 15]).lower()
+            if "pd.dataframe" in window or "sample_data" in window:
+                return "pd.DataFrame created under missing-file guard"
+    return None
+
+
 def add_requirements(state: State):
     """사용자 요청에서 요구사항을 뽑아 state에 저장."""
     user_request = state.get("user_request", "")
@@ -183,9 +205,10 @@ def add_requirements(state: State):
 def chatbot(state: State, llm_with_tools: ChatOpenAI):
     """첫 번째 LLM 호출 및 user_request 유지."""
     system = (
-        "You can call tools. If the user message contains a local filesystem path, you MUST call the tool "
-        "`load_and_sample` with that path first to inspect the dataset. "
-        "Do NOT call `list_images_to_csv` directly; `load_and_sample` will handle image folders when needed."
+        "You can call tools. If the user message contains a local filesystem path, you MUST call "
+        "`inspect_input` with that path first. "
+        "If it is an image folder, use `list_images_to_csv`. "
+        "Otherwise, you can call `sample_table` and then `summarize_table`."
     )
     response = llm_with_tools.invoke([("system", system), *state["messages"]])
     user_req = state.get("user_request") or _extract_user_request(state.get("messages", []))
@@ -220,11 +243,45 @@ def add_context(state: State):
         tool_name = tc.get("name")
         args = tc.get("args", {})
         try:
-            if tool_name == "load_and_sample" and args:
-                context_str = load_and_sample.invoke(args)
+            if tool_name == "inspect_input" and args:
+                inspect_str = inspect_input.invoke(args)
+                if isinstance(inspect_str, str) and inspect_str.startswith("ERROR_CONTEXT||"):
+                    context_str = inspect_str
+                    break
+                try:
+                    inspect_info = json.loads(inspect_str)
+                except Exception as exc:  # noqa: BLE001
+                    context_str = f"ERROR_CONTEXT||InvalidJSON||{exc}"
+                    break
+                if isinstance(inspect_info, dict) and inspect_info.get("has_images"):
+                    context_str = list_images_to_csv.invoke({"dir_path": inspect_info.get("input_path", "")})
+                    break
+                target = ""
+                if isinstance(inspect_info, dict):
+                    target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
+                if not target:
+                    target = args.get("path", "")
+                sample_json = sample_table.invoke({"path": target, "sample_size": args.get("sample_size", 5000)})
+                if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
+                    context_str = sample_json
+                    break
+                context_str = summarize_table.invoke({"sample_json": sample_json})
+                break
+            if tool_name == "sample_table" and args:
+                sample_json = sample_table.invoke(args)
+                if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
+                    context_str = sample_json
+                    break
+                context_str = summarize_table.invoke({"sample_json": sample_json})
+                break
+            if tool_name == "summarize_table" and args:
+                context_str = summarize_table.invoke(args)
                 break
             if tool_name == "list_images_to_csv" and args:
                 context_str = list_images_to_csv.invoke(args)
+                break
+            if tool_name == "load_and_sample" and args:
+                context_str = load_and_sample.invoke(args)
                 break
         except Exception as exc:  # noqa: BLE001
             context_str = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
@@ -375,6 +432,35 @@ def code_check(state: State):
     code_solution = state["generation"]
     imports = code_solution.imports
     code = code_solution.code
+
+    sample_fallback_reason = _detect_sample_fallback(code)
+    if sample_fallback_reason:
+        error_detail = (
+            "샘플 데이터 생성(폴백) 로직이 감지되어 실행을 중단합니다. "
+            "실제 파일이 없으면 즉시 실패해야 하며, 샘플 데이터를 만들면 안 됩니다.\n"
+            f"감지 사유: {sample_fallback_reason}"
+        )
+        error_message = [("user", error_detail)]
+        return {
+            "generation": code_solution,
+            "messages": error_message,
+            "error": "yes",
+            "phase": "executing",
+            "execution_stdout": "",
+            **_append_trace(
+                state,
+                {
+                    "ts": _now_iso(),
+                    "node": "code_check",
+                    "phase": "executing",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "error_detail": error_detail,
+                    "execution_stdout": "",
+                    "generation": {"imports": imports, "code": code},
+                },
+            ),
+        }
 
     stdout_buffer = io.StringIO()
     exec_globals: Dict[str, Any] = {}
@@ -809,12 +895,18 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     code_solution_str = (
         f"Imports: {code_solution.imports} \n Code: {code_solution.code}"
     )
+    prev_generation = {
+        "imports": getattr(code_solution, "imports", ""),
+        "code": getattr(code_solution, "code", ""),
+    }
 
     corrected_code = llm_coder.invoke(
         reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
     )
     code_structurer = llm_gpt.with_structured_output(CodeBlocks)
     reflections = code_structurer.invoke(corrected_code.content)
+    next_generation = {"imports": reflections.imports, "code": reflections.code}
+    diff_text, diff_summary = diff_generation(prev_generation, next_generation)
 
     messages = [
         (
@@ -837,183 +929,14 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
                 "iterations": int(state.get("iterations", 0) or 0) + 1,
                 "error_input": error,
                 "generation": {"imports": reflections.imports, "code": reflections.code},
+                "prev_generation": prev_generation,
+                "diff_summary": diff_summary,
+                "diff": diff_text,
             },
         ),
     }
 
 
-def write_internal_trace_markdown(state: Dict[str, Any]) -> str | None:
-    """누적된 trace를 Markdown 파일로 backend/outputs에 저장하고 파일명을 반환."""
-    trace = state.get("trace") or []
-    if not isinstance(trace, list) or not trace:
-        return None
-
-    run_id = str(state.get("run_id") or "").strip()
-    if not run_id:
-        return None
-
-    out_dir = _outputs_root_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"run_{run_id}_internal_trace.md"
-    path = (out_dir / filename).resolve()
-    try:
-        path.relative_to(out_dir.resolve())
-    except Exception:
-        return None
-
-    def _md_code(lang: str, text: str) -> str:
-        return f"```{lang}\n{text}\n```"
-
-    lines: list[str] = []
-    lines.append("# 내부 기록 (Internal Trace)")
-    lines.append("")
-    lines.append(f"- run_id: `{run_id}`")
-    lines.append(f"- created_at: `{_now_iso()}`")
-    lines.append(f"- output_formats: `{state.get('output_formats')}`")
-    lines.append("")
-
-    final_files = state.get("output_files") or []
-    if isinstance(final_files, list):
-        lines.append("## 최종 산출물")
-        lines.append("")
-        if final_files:
-            for f in final_files:
-                lines.append(f"- `{f}`")
-        else:
-            lines.append("- (none)")
-        lines.append("")
-
-    lines.append("## 이벤트 로그")
-    lines.append("")
-
-    for idx, ev in enumerate(trace, start=1):
-        if not isinstance(ev, dict):
-            lines.append(f"### Step {idx}")
-            lines.append("")
-            lines.append(_md_code("text", str(ev)))
-            lines.append("")
-            continue
-
-        node = str(ev.get("node") or "")
-        phase = str(ev.get("phase") or "")
-        ts = str(ev.get("ts") or "")
-        it = ev.get("iterations")
-        title_bits = [b for b in [node or "event", phase] if b]
-        title = " / ".join(title_bits)
-        lines.append(f"### Step {idx}: {title}")
-        lines.append("")
-        if ts:
-            lines.append(f"- ts: `{ts}`")
-        if it is not None:
-            lines.append(f"- iterations: `{it}`")
-        if "error" in ev:
-            lines.append(f"- error: `{ev.get('error')}`")
-        lines.append("")
-
-        if ev.get("user_request"):
-            lines.append("**user_request**")
-            lines.append("")
-            lines.append(_md_code("text", str(ev.get("user_request"))))
-            lines.append("")
-
-        if ev.get("requirements"):
-            lines.append("**requirements**")
-            lines.append("")
-            lines.append(_md_code("json", json.dumps(ev.get("requirements"), ensure_ascii=False, indent=2)))
-            lines.append("")
-
-        if ev.get("context"):
-            lines.append("**context (sampling/summary)**")
-            lines.append("")
-            lines.append(_md_code("text", str(ev.get("context"))))
-            lines.append("")
-
-        if ev.get("generation"):
-            gen = ev.get("generation") or {}
-            if isinstance(gen, dict):
-                imports = str(gen.get("imports") or "")
-                code = str(gen.get("code") or "")
-                lines.append("**generated imports**")
-                lines.append("")
-                lines.append(_md_code("python", imports))
-                lines.append("")
-                lines.append("**generated code**")
-                lines.append("")
-                lines.append(_md_code("python", code))
-                lines.append("")
-            else:
-                lines.append("**generation**")
-                lines.append("")
-                lines.append(_md_code("text", str(gen)))
-                lines.append("")
-
-        if ev.get("tool_calls") is not None:
-            lines.append("**tool_calls**")
-            lines.append("")
-            lines.append(_md_code("json", json.dumps(ev.get("tool_calls"), ensure_ascii=False, indent=2, default=str)))
-            lines.append("")
-
-        if ev.get("assistant_message"):
-            lines.append("**assistant_message**")
-            lines.append("")
-            lines.append(_md_code("text", str(ev.get("assistant_message"))))
-            lines.append("")
-
-        if ev.get("error_detail"):
-            lines.append("**error_detail**")
-            lines.append("")
-            lines.append(_md_code("text", str(ev.get("error_detail"))))
-            lines.append("")
-
-        if ev.get("execution_stdout"):
-            lines.append("**execution_stdout**")
-            lines.append("")
-            lines.append(_md_code("text", str(ev.get("execution_stdout"))))
-            lines.append("")
-
-        if ev.get("validation_report") is not None:
-            lines.append("**validation_report**")
-            lines.append("")
-            lines.append(_md_code("json", json.dumps(ev.get("validation_report"), ensure_ascii=False, indent=2, default=str)))
-            lines.append("")
-
-        if ev.get("output_files"):
-            lines.append("**output_files**")
-            lines.append("")
-            lines.append(_md_code("json", json.dumps(ev.get("output_files"), ensure_ascii=False, indent=2)))
-            lines.append("")
-
-        known = {
-            "ts",
-            "node",
-            "phase",
-            "iterations",
-            "user_request",
-            "requirements",
-            "context",
-            "generation",
-            "tool_calls",
-            "assistant_message",
-            "error",
-            "error_detail",
-            "execution_stdout",
-            "validation_report",
-            "output_files",
-            "raw_error",
-            "last_message",
-            "output_formats",
-            "execution_stdout_tail",
-            "error_input",
-        }
-        extras = {k: v for k, v in ev.items() if k not in known}
-        if extras:
-            lines.append("**extras**")
-            lines.append("")
-            lines.append(_md_code("json", json.dumps(extras, ensure_ascii=False, indent=2, default=str)))
-            lines.append("")
-
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return filename
 # ===================================== 노드 함수 끝 =============================
 
 # ======================================= 라우터: 조건 분기 함수 영역 ======================
@@ -1063,7 +986,9 @@ def build_graph(
     """LangGraph를 구성하고 컴파일된 그래프를 반환."""
     llm_gpt = ChatOpenAI(model=llm_model)
     llm_coder = ChatOpenAI(model=coder_model, temperature=0)
-    llm_with_tools = llm_gpt.bind_tools(tools=[load_and_sample, list_images_to_csv])
+    llm_with_tools = llm_gpt.bind_tools(
+        tools=[inspect_input, sample_table, summarize_table, list_images_to_csv]
+    )
 
     graph_builder = StateGraph(State)
 
@@ -1165,4 +1090,4 @@ def run_request(
 # ===== 엔트리포인트 끝 =====
 
 
-__all__ = ["build_graph", "run_request", "write_internal_trace_markdown"]
+__all__ = ["build_graph", "run_request"]

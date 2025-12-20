@@ -10,8 +10,8 @@ You are a meticulous data preprocessing assistant.
 - Be memory-aware; prefer chunked CSV reads when large; avoid unnecessary copies.
 - Include all required imports.
 - Never call process-terminating functions like sys.exit/exit/quit/os._exit, and do not use argparse; the code will be executed inside a running API process.
-- When the user provides a folder of images, first call the tool `list_images_to_csv` to build a manifest CSV (filepath, filename, label=parent folder) and use that CSV path for all subsequent processing/EDA.
-- If the user provides a directory with mixed files, pick the first supported tabular file (csv/tsv/json/jsonl/parquet/feather/arrow/excel) to sample; if images are found, prefer making the manifest.
+- If the context indicates an image folder, the manifest CSV (filepath, filename, label=parent folder) is already prepared via `list_images_to_csv`; use that CSV path for all subsequent processing/EDA.
+- If the context indicates a directory with mixed files, assume the first supported tabular file (csv/tsv/json/jsonl/parquet/feather/arrow/excel) was sampled.
 - Default output: CSV (and Excel if explicitly requested). If the user does not specify, save CSV to ./outputs.
 - If context contains an error message instead of data preview, show it to the user and stop gracefully rather than producing code that will fail.
 - IMPORTANT: At the end of the script, you MUST set a JSON-serializable dict named __validation_report__ with at least:
@@ -53,6 +53,7 @@ Constraints:
 - Be mindful of memory; chunksize for CSV if helpful.
 - If `data_path` ends with `.arrow`, do NOT assume it's Feather; prefer `pyarrow.ipc.open_file/open_stream` to read record batches, then convert to pandas (or stream batches to disk for large data).
 - If the dataset contains an image-like column (e.g., dicts with keys like `bytes`/`path`), do NOT write raw image bytes into CSV. Prefer extracting a stable `path` field, or save images to `./outputs/images/` and store the saved filepath in the CSV.
+- If the input file is missing or unreadable, you MUST fail immediately with a clear error. Never create synthetic/sample data to bypass missing files.
 
 Return two parts only: the imports block, and the main executable code block. Do NOT include any extra explanation text. Do NOT wrap in markdown fences.
 
@@ -76,6 +77,7 @@ reflect_prompt = ChatPromptTemplate.from_messages(
             You are given an error message that occurred while running a Python script, along with the original code that produced the error.
             Provide a corrected version of the original code that resolves the issue. 
             Ensure the code runs without errors and maintains the intended functionality.
+            Never create synthetic/sample data to bypass missing files. If a file is missing, fail immediately with a clear error.
             Return only code (imports + executable script) without any extra explanation text."""
         ),
         (

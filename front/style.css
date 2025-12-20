@@ -183,6 +183,10 @@ input {
   background: #fafbff;
 }
 
+#question {
+  min-height: 160px;
+}
+
 textarea:focus,
 input:focus {
   outline: 2px solid rgba(43, 108, 176, 0.2);
@@ -520,6 +524,8 @@ ul {
   border: 1px solid var(--border);
   background: #ffffff;
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 280px;
   -webkit-overflow-scrolling: touch;
 }
 

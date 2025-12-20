@@ -7,7 +7,7 @@ Jupyter 노트북에서 출발한 LangGraph 기반 파이프라인을 **모듈 +
 
 ## 프로젝트 구조
 - `src/data_preprocessing/`
-  - `tools.py` · 데이터 샘플링/요약 도구 (`@tool`)
+  - `tools.py` · 데이터 샘플링/요약 도구 (`inspect_input`, `sample_table`, `summarize_table`, `list_images_to_csv`)
   - `prompts.py` · 코드 생성·수정 프롬프트
   - `models.py` · 코드 구조(pydantic), 그래프 상태 정의
   - `workflow.py` · LangGraph 그래프 빌더 및 실행 로직
@@ -62,10 +62,19 @@ make serve              # uvicorn --reload, 기본 포트 8000
 - `POST /upload` · 폼 업로드(필드: `files`, 다중/폴더 업로드 지원). 서버에 저장 후 로컬 경로 반환.
 - `POST /s3/create_upload_session`, `POST /s3/presign_put` · (옵션) S3 presigned 업로드 지원
 - `GET /downloads/{run_id}/{filename}` · 산출물 다운로드
-- `GET /downloads/{run_id}/{filename}/preview?n=5` · 산출물 미리보기(표 파일만)
+- `GET /downloads/{run_id}/{filename}/preview?n=5` · 산출물 미리보기(표 파일만, n 변경 가능)
+
+## 산출물/업로드 정리(자동 삭제)
+실행 산출물과 업로드 파일은 기본 30분 TTL로 자동 삭제됩니다.
+
+- 출력물: `backend/outputs/`
+- 업로드: `backend/outputs/uploads/`
+- 환경 변수
+  - `RUN_OUTPUT_TTL_SECONDS` (기본 1800초)
+  - `RUN_OUTPUT_CLEANUP_INTERVAL_SECONDS` (기본 300초)
 
 ## 내부 기록 파일 (Trace)
-실행마다 `backend/outputs/run_<run_id>_internal_trace.md`가 생성됩니다.  
+실행마다 `backend/outputs/run_<run_id>_internal_trace_내부기록.md`가 생성됩니다.  
 에이전트 단계/코드/에러/검증/샘플링 요약이 포함되며, 과제 증빙 용도로 활용할 수 있습니다.
 
 프런트는 도커/Nginx 환경에서 `/api`로 호출하도록 구성돼 있습니다.

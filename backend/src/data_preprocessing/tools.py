@@ -297,24 +297,63 @@ def _summarize_dataframe(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
 # =========================
 
 @tool
-def load_and_sample(path: str, sample_size: int = 5000) -> str:
-    """파일 또는 디렉터리를 일부 로드/인덱싱해 마크다운으로 요약 반환.
+def inspect_input(path: str, max_files: int = 50) -> str:
+    """입력 경로를 검사해 이미지 폴더/테이블 후보를 판별."""
 
-    - 지원 포맷: csv/tsv/json/jsonl/parquet/arrow/feather/excel
-    - 디렉터리 입력 시: 이미지가 있으면 매니페스트(csv) 생성, 아니면 첫 지원 파일을 샘플링.
-    - 샘플 크기까지만 읽어 메모리를 보호한다.
-    - 실패 시 ERROR_CONTEXT 마커와 함께 원문 에러를 반환한다.
-    """
+    p = _resolve_path(path)
+    if not p.exists():
+        return f"ERROR_CONTEXT||FileNotFoundError||{path} 경로가 존재하지 않습니다."
+
+    if p.is_dir():
+        has_image = any(f.suffix.lower() in _IMAGE_EXTS for f in p.rglob("*") if f.is_file())
+        candidates: list[str] = []
+        for f in p.rglob("*"):
+            if not f.is_file():
+                continue
+            if f.name in _HF_METADATA_FILENAMES:
+                continue
+            ext = f.suffix.lower()
+            if ext not in _SUPPORTED_EXTS:
+                continue
+            candidates.append(str(f.resolve()))
+            if len(candidates) >= max_files:
+                break
+
+        candidate = _pick_candidate_from_dir(p)
+        if not has_image and candidate is None:
+            return f"ERROR_CONTEXT||NoSupportedFiles||{p} 아래에서 지원하는 데이터 파일을 찾지 못했습니다."
+
+        payload = {
+            "input_path": str(p),
+            "is_dir": True,
+            "has_images": bool(has_image),
+            "candidate_file": str(candidate) if candidate else "",
+            "supported_files": candidates,
+            "supported_count": len(candidates),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    payload = {
+        "input_path": str(p),
+        "is_dir": False,
+        "has_images": False,
+        "candidate_file": str(p),
+        "supported_files": [str(p)],
+        "supported_count": 1,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@tool
+def sample_table(path: str, sample_size: int = 5000) -> str:
+    """표 형식 파일(또는 디렉터리)을 샘플링해 JSON으로 반환."""
 
     p = _resolve_path(path)
 
-    # 디렉터리 처리: 이미지가 있으면 매니페스트 우선
     if p.is_dir():
-        has_image = any(f.suffix.lower() in _IMAGE_EXTS for f in p.rglob("*"))
+        has_image = any(f.suffix.lower() in _IMAGE_EXTS for f in p.rglob("*") if f.is_file())
         if has_image:
-            manifest_info = list_images_to_csv.invoke({"dir_path": str(p)})
-            return manifest_info
-
+            return f"ERROR_CONTEXT||ImageFolder||{p} 아래에 이미지가 있어 테이블 샘플링을 생략합니다."
         candidate = _pick_candidate_from_dir(p)
         if candidate is None:
             return f"ERROR_CONTEXT||NoSupportedFiles||{p} 아래에서 지원하는 데이터 파일을 찾지 못했습니다."
@@ -325,12 +364,46 @@ def load_and_sample(path: str, sample_size: int = 5000) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
 
+    try:
+        sample_records = json.loads(df.to_json(orient="records", date_format="iso"))
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||SampleSerializeError||{exc}"
+
+    payload = {
+        "data_path": str(p),
+        "detected_format": fmt,
+        "sample_rows": len(df),
+        "sample": sample_records,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@tool
+def summarize_table(sample_json: str) -> str:
+    """sample_table JSON을 요약 Markdown으로 변환."""
+
+    try:
+        payload = json.loads(sample_json)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||InvalidJSON||{exc}"
+
+    if not isinstance(payload, dict):
+        return "ERROR_CONTEXT||InvalidPayload||sample_json은 dict 형태여야 합니다."
+
+    sample = payload.get("sample")
+    if not isinstance(sample, list):
+        return "ERROR_CONTEXT||InvalidPayload||sample_json['sample']이 list가 아닙니다."
+
+    df = pd.DataFrame(sample)
     head_md, dtypes_md, missing_md, numeric_md, categorical_md = _summarize_dataframe(df)
+    data_path = payload.get("data_path", "")
+    fmt = payload.get("detected_format", "")
+    sample_rows = payload.get("sample_rows", len(df))
 
     return (
-        f"data_path: {p}\n"
+        f"data_path: {data_path}\n"
         f"detected_format: {fmt}\n"
-        f"sample_rows: {len(df)}\n"
+        f"sample_rows: {sample_rows}\n"
         "head:\n"
         f"{head_md}\n\n"
         "dtypes:\n"
@@ -342,6 +415,28 @@ def load_and_sample(path: str, sample_size: int = 5000) -> str:
         f"categorical/examples (top {_CATEGORICAL_TOP_COLS} cols):\n"
         f"{categorical_md}\n"
     )
+
+
+@tool
+def load_and_sample(path: str, sample_size: int = 5000) -> str:
+    """호환성 유지용 래퍼(내부적으로 inspect/sample/summarize 사용)."""
+
+    info = inspect_input.invoke({"path": path})
+    if isinstance(info, str) and info.startswith("ERROR_CONTEXT||"):
+        return info
+    try:
+        parsed = json.loads(info)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||InvalidJSON||{exc}"
+
+    if parsed.get("has_images"):
+        return list_images_to_csv.invoke({"dir_path": parsed.get("input_path", path)})
+
+    target = parsed.get("candidate_file") or parsed.get("input_path") or path
+    sample_json = sample_table.invoke({"path": target, "sample_size": sample_size})
+    if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
+        return sample_json
+    return summarize_table.invoke({"sample_json": sample_json})
 
 
 @tool
@@ -378,4 +473,10 @@ def list_images_to_csv(
     )
 
 
-__all__ = ["load_and_sample", "list_images_to_csv"]
+__all__ = [
+    "inspect_input",
+    "sample_table",
+    "summarize_table",
+    "list_images_to_csv",
+    "load_and_sample",
+]

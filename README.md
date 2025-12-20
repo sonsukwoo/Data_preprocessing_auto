@@ -53,7 +53,7 @@ flowchart LR
   U[User (Browser)] -->|HTTP :8080| N[Nginx (front)]
   N -->|/api/* proxy| A[FastAPI (backend :8000)]
   A --> G[LangGraph Agent]
-  G -->|tool call| T[load_and_sample / list_images_to_csv]
+  G -->|tool call| T[inspect_input / sample_table / summarize_table / list_images_to_csv]
   G -->|generate code| P[Python script]
   P -->|write outputs| O[(backend/outputs)]
   A -->|downloads + preview| U
@@ -96,12 +96,12 @@ flowchart TD
 ## 어떻게 “전처리”가 수행되나 (동작 설명)
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
-2) **샘플링/요약**: `load_and_sample` 툴이 데이터(또는 폴더)를 샘플링해서 컨텍스트 생성  
+2) **샘플링/요약**: `inspect_input` → `sample_table`/`summarize_table`로 데이터(또는 폴더) 샘플·요약 컨텍스트 생성  
 3) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 4) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 5) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
 6) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
-7) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링 요약을 모아 `run_<run_id>_internal_trace.md`를 함께 생성
+7) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링 요약을 모아 `run_<run_id>_internal_trace_내부기록.md`를 함께 생성
 
 ---
 
@@ -114,11 +114,33 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 
 ---
 
+## 산출물/업로드 정리(자동 삭제)
+
+실행 산출물과 업로드 파일은 **기본 30분 TTL**로 자동 삭제됩니다.
+
+- 출력물: `backend/outputs/`
+- 업로드: `backend/outputs/uploads/`
+- 환경 변수로 조정 가능
+  - `RUN_OUTPUT_TTL_SECONDS` (기본 1800초)
+  - `RUN_OUTPUT_CLEANUP_INTERVAL_SECONDS` (기본 300초)
+
+---
+
+## 미리보기(Preview)
+
+다운로드 링크와 별도로, 결과 파일 상위 행 미리보기를 제공합니다.
+
+- `GET /downloads/{run_id}/{filename}/preview?n=20`
+  - CSV/Parquet/XLSX 등 표 형식 파일만 지원
+  - 응답: `{ filename, columns, rows }`
+
+---
+
 ## 내부 기록 파일 (Trace)
 
 매 실행마다 아래 파일이 결과물로 함께 생성됩니다:
 
-- `run_<run_id>_internal_trace.md`
+- `run_<run_id>_internal_trace_내부기록.md`
 
 포함 내용:
 - 단계별 타임라인 (`add_requirements → chatbot → add_context → generate → code_check → validate → reflect`)
@@ -126,7 +148,7 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - 실행 오류(traceback), stdout, validation report
 - 샘플링 결과 요약
 
-과제 제출용으로 “블랙박스가 아닌 내부 동작 증빙”에 활용할 수 있습니다.
+“블랙박스가 아닌 내부 동작 증빙”에 활용할 수 있습니다.
 
 ---
 
