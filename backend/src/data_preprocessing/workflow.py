@@ -7,7 +7,7 @@ import os
 import traceback
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from langchain_openai import ChatOpenAI
@@ -83,69 +83,35 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI):
         ),
     }
 
-# add_context: 툴 결과(샘플/매니페스트/에러)를 컨텍스트에 저장
+# add_context: LLM tool_call 중 실제 실행할 대상을 선택
 def add_context(state: State):
-    """도구 호출 결과에서 컨텍스트를 추출 (파일 샘플 or 이미지 목록)."""
+    """LLM이 반환한 tool_calls 중 첫 번째 유효 호출을 선택해 저장."""
     if messages := state.get("messages", []):
         message = messages[-1]
     else:
         raise ValueError("No message found in input")
 
-    context_str = None
-    for tc in getattr(message, "tool_calls", []):
-        tool_name = tc.get("name")
-        args = tc.get("args", {})
-        try:
-            if tool_name == "inspect_input" and args:
-                inspect_str = inspect_input.invoke(args)
-                if isinstance(inspect_str, str) and inspect_str.startswith("ERROR_CONTEXT||"):
-                    context_str = inspect_str
-                    break
-                try:
-                    inspect_info = json.loads(inspect_str)
-                except Exception as exc:  # noqa: BLE001
-                    context_str = f"ERROR_CONTEXT||InvalidJSON||{exc}"
-                    break
-                if isinstance(inspect_info, dict) and inspect_info.get("has_images"):
-                    context_str = list_images_to_csv.invoke({"dir_path": inspect_info.get("input_path", "")})
-                    break
-                target = ""
-                if isinstance(inspect_info, dict):
-                    target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
-                if not target:
-                    target = args.get("path", "")
-                sample_json = sample_table.invoke({"path": target, "sample_size": args.get("sample_size", 5000)})
-                if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
-                    context_str = sample_json
-                    break
-                context_str = summarize_table.invoke({"sample_json": sample_json})
-                break
-            if tool_name == "sample_table" and args:
-                sample_json = sample_table.invoke(args)
-                if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
-                    context_str = sample_json
-                    break
-                context_str = summarize_table.invoke({"sample_json": sample_json})
-                break
-            if tool_name == "summarize_table" and args:
-                context_str = summarize_table.invoke(args)
-                break
-            if tool_name == "list_images_to_csv" and args:
-                context_str = list_images_to_csv.invoke(args)
-                break
-            if tool_name == "load_and_sample" and args:
-                context_str = load_and_sample.invoke(args)
-                break
-        except Exception as exc:  # noqa: BLE001
-            context_str = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+    tool_calls = getattr(message, "tool_calls", []) or []
+    selected: Optional[dict[str, Any]] = None
+    for tc in tool_calls:
+        name = tc.get("name")
+        if name in {"inspect_input", "sample_table", "summarize_table", "list_images_to_csv", "load_and_sample"}:
+            selected = tc
             break
 
-    if not context_str:
-        raise ValueError("No tool result found; ensure tool call executed or supported format present")
+    if not selected:
+        raise ValueError("No supported tool call found in LLM response.")
 
+    tool_name = str(selected.get("name") or "")
+    tool_args = selected.get("args") or {}
     user_request = state.get("user_request", "")
     return {
-        "context": context_str,
+        "tool_call_name": tool_name,
+        "tool_call_args": tool_args,
+        "context_candidate": None,
+        "inspect_result": None,
+        "sample_json": None,
+        "summary_context": None,
         "user_request": user_request,
         "phase": "sampling",
         **append_trace(
@@ -156,7 +122,216 @@ def add_context(state: State):
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "user_request": user_request,
-                "context": context_str,
+                "tool_calls": tool_calls,
+                "tool_call_selected": {"name": tool_name, "args": tool_args},
+            },
+        ),
+    }
+
+
+# run_inspect: 입력 경로 검사(파일/폴더/이미지 여부 판단)
+def run_inspect(state: State):
+    """inspect_input을 실행해 입력 상태를 구조화."""
+    args = state.get("tool_call_args") or {}
+    user_request = state.get("user_request", "")
+    context_candidate: Optional[str] = None
+    inspect_info: Optional[dict[str, Any]] = None
+    try:
+        inspect_str = inspect_input.invoke(args)
+        if isinstance(inspect_str, str) and inspect_str.startswith("ERROR_CONTEXT||"):
+            context_candidate = inspect_str
+        else:
+            try:
+                parsed = json.loads(inspect_str)
+            except Exception as exc:  # noqa: BLE001
+                context_candidate = f"ERROR_CONTEXT||InvalidJSON||{exc}"
+            else:
+                if isinstance(parsed, dict):
+                    inspect_info = parsed
+                else:
+                    context_candidate = "ERROR_CONTEXT||InvalidPayload||inspect_input 결과가 dict가 아닙니다."
+    except Exception as exc:  # noqa: BLE001
+        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    return {
+        "inspect_result": inspect_info,
+        "context_candidate": context_candidate,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "run_inspect",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "inspect_result": inspect_info,
+                "context_candidate": context_candidate,
+            },
+        ),
+    }
+
+
+# run_image_manifest: 이미지 폴더를 CSV 매니페스트로 정리
+def run_image_manifest(state: State):
+    """이미지 폴더를 list_images_to_csv로 매니페스트화."""
+    user_request = state.get("user_request", "")
+    context_candidate: Optional[str] = None
+    try:
+        tool_name = state.get("tool_call_name")
+        args = state.get("tool_call_args") or {}
+        if tool_name != "list_images_to_csv":
+            inspect_info = state.get("inspect_result") or {}
+            dir_path = inspect_info.get("input_path") or ""
+            args = {"dir_path": dir_path}
+        context_candidate = list_images_to_csv.invoke(args)
+    except Exception as exc:  # noqa: BLE001
+        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    return {
+        "context_candidate": context_candidate,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "run_image_manifest",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context_candidate": context_candidate,
+            },
+        ),
+    }
+
+
+# run_sample: 테이블 파일 샘플링 수행
+def run_sample(state: State):
+    """sample_table을 실행해 샘플 JSON 생성."""
+    user_request = state.get("user_request", "")
+    tool_name = state.get("tool_call_name")
+    tool_args = state.get("tool_call_args") or {}
+    context_candidate: Optional[str] = None
+    sample_json: Optional[str] = None
+    try:
+        if tool_name == "sample_table":
+            args = tool_args
+        else:
+            inspect_info = state.get("inspect_result") or {}
+            target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
+            sample_size = tool_args.get("sample_size", 5000)
+            args = {"path": target, "sample_size": sample_size}
+        sample_json = sample_table.invoke(args)
+        if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
+            context_candidate = sample_json
+    except Exception as exc:  # noqa: BLE001
+        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    return {
+        "sample_json": sample_json,
+        "context_candidate": context_candidate,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "run_sample",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context_candidate": context_candidate,
+            },
+        ),
+    }
+
+
+# run_summarize: 샘플 JSON 요약 수행
+def run_summarize(state: State):
+    """summarize_table을 실행해 컨텍스트 요약 생성."""
+    user_request = state.get("user_request", "")
+    tool_name = state.get("tool_call_name")
+    tool_args = state.get("tool_call_args") or {}
+    context_candidate: Optional[str] = None
+    summary_context: Optional[str] = None
+    try:
+        if tool_name == "summarize_table":
+            sample_json = tool_args.get("sample_json", "")
+        else:
+            sample_json = state.get("sample_json", "")
+        if not sample_json:
+            context_candidate = "ERROR_CONTEXT||MissingSample||sample_json이 비어 있습니다."
+        else:
+            summary_context = summarize_table.invoke({"sample_json": sample_json})
+            context_candidate = summary_context
+    except Exception as exc:  # noqa: BLE001
+        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    return {
+        "summary_context": summary_context,
+        "context_candidate": context_candidate,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "run_summarize",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context_candidate": context_candidate,
+            },
+        ),
+    }
+
+
+# run_load_and_sample: 통합 샘플링(호환성 유지)
+def run_load_and_sample(state: State):
+    """load_and_sample을 실행해 컨텍스트를 직접 생성."""
+    user_request = state.get("user_request", "")
+    tool_args = state.get("tool_call_args") or {}
+    context_candidate: Optional[str] = None
+    try:
+        context_candidate = load_and_sample.invoke(tool_args)
+    except Exception as exc:  # noqa: BLE001
+        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    return {
+        "context_candidate": context_candidate,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "run_load_and_sample",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context_candidate": context_candidate,
+            },
+        ),
+    }
+
+
+# build_context: 최종 컨텍스트 확정
+def build_context(state: State):
+    """중간 결과(context_candidate)를 최종 context로 확정."""
+    context_candidate = state.get("context_candidate")
+    if not context_candidate:
+        raise ValueError("context_candidate가 비어 있습니다.")
+    user_request = state.get("user_request", "")
+    return {
+        "context": context_candidate,
+        "user_request": user_request,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "build_context",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context": context_candidate,
             },
         ),
     }
@@ -793,6 +968,39 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
 # ===================================== 노드 함수 끝 =============================
 
 # ======================================= 라우터: 조건 분기 함수 영역 ======================
+# route_tool_call: 선택된 tool_call에 따라 실행 노드 분기
+def route_tool_call(state: State):
+    tool_name = state.get("tool_call_name") or ""
+    if tool_name == "inspect_input":
+        return "run_inspect"
+    if tool_name == "sample_table":
+        return "run_sample"
+    if tool_name == "summarize_table":
+        return "run_summarize"
+    if tool_name == "list_images_to_csv":
+        return "run_image_manifest"
+    if tool_name == "load_and_sample":
+        return "run_load_and_sample"
+    return END
+
+# route_after_inspect: 검사 결과에 따라 이미지/샘플/에러 분기
+def route_after_inspect(state: State):
+    ctx = state.get("context_candidate", "")
+    if isinstance(ctx, str) and ctx.startswith("ERROR_CONTEXT||"):
+        return "build_context"
+    info = state.get("inspect_result") or {}
+    if isinstance(info, dict) and info.get("has_images"):
+        return "run_image_manifest"
+    return "run_sample"
+
+# route_after_sample: 샘플링 실패 여부에 따라 요약/에러 분기
+def route_after_sample(state: State):
+    ctx = state.get("context_candidate", "")
+    if isinstance(ctx, str) and ctx.startswith("ERROR_CONTEXT||"):
+        return "build_context"
+    return "run_summarize"
+
+# route_after_context: 최종 컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기
 def route_after_context(state: State):
     """컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기."""
     ctx = state.get("context", "")
@@ -846,15 +1054,26 @@ def build_graph(
     graph_builder = StateGraph(State)
 
     # ===== 노드: 그래프에 노드 추가 =====
-    graph_builder.add_node("add_requirements", add_requirements)                                    # user_request → requirements
-    graph_builder.add_node("chatbot", partial(chatbot, llm_with_tools=llm_with_tools))              # 첫 LLM 호출 + tool call 유도
-    graph_builder.add_node("add_context", add_context)                                              # tool 결과 → context 저장
-    graph_builder.add_node("friendly_error", partial(friendly_error, llm_gpt=llm_gpt))              # 에러 메시지 친절화
-    graph_builder.add_node("final_friendly_error", partial(final_friendly_error, llm_gpt=llm_gpt))  # 최종 실패 친절화
-    graph_builder.add_node("generate", partial(generate, llm_coder=llm_coder, llm_gpt=llm_gpt))     # 코드 초안 생성
-    graph_builder.add_node("code_check", code_check)                                                # 생성 코드 실행/검증
-    graph_builder.add_node("validate", validate)                                                    # 실행 결과 검증(silent miss 방지)
-    graph_builder.add_node("reflect", partial(reflect, llm_coder=llm_coder, llm_gpt=llm_gpt))       # 오류 시 수정 재생성
+    # 요구사항 추출
+    graph_builder.add_node("add_requirements", add_requirements)
+    # 요청 해석 + tool call 결정
+    graph_builder.add_node("chatbot", partial(chatbot, llm_with_tools=llm_with_tools))
+    # tool call 선택/기록
+    graph_builder.add_node("add_context", add_context)
+    # 입력 검사/샘플링/요약 단계 분리
+    graph_builder.add_node("run_inspect", run_inspect)
+    graph_builder.add_node("run_image_manifest", run_image_manifest)
+    graph_builder.add_node("run_sample", run_sample)
+    graph_builder.add_node("run_summarize", run_summarize)
+    graph_builder.add_node("run_load_and_sample", run_load_and_sample)
+    graph_builder.add_node("build_context", build_context)
+    # 에러/코드 생성/실행/검증/리플렉트
+    graph_builder.add_node("friendly_error", partial(friendly_error, llm_gpt=llm_gpt))
+    graph_builder.add_node("final_friendly_error", partial(final_friendly_error, llm_gpt=llm_gpt))
+    graph_builder.add_node("generate", partial(generate, llm_coder=llm_coder, llm_gpt=llm_gpt))
+    graph_builder.add_node("code_check", code_check)
+    graph_builder.add_node("validate", validate)
+    graph_builder.add_node("reflect", partial(reflect, llm_coder=llm_coder, llm_gpt=llm_gpt))
     # ===== 노드 끝 =====
 
 
@@ -869,9 +1088,46 @@ def build_graph(
         {"add_context": "add_context", END: END},
     )
 
-    # add_context 이후: 오류 컨텍스트면 friendly_error, 아니면 generate
+    # add_context 이후: tool_call 종류에 따라 분기
     graph_builder.add_conditional_edges(
         "add_context",
+        route_tool_call,
+        {
+            "run_inspect": "run_inspect",
+            "run_sample": "run_sample",
+            "run_summarize": "run_summarize",
+            "run_image_manifest": "run_image_manifest",
+            "run_load_and_sample": "run_load_and_sample",
+            END: END,
+        },
+    )
+
+    # inspect 이후: 이미지/샘플/에러 분기
+    graph_builder.add_conditional_edges(
+        "run_inspect",
+        route_after_inspect,
+        {
+            "run_image_manifest": "run_image_manifest",
+            "run_sample": "run_sample",
+            "build_context": "build_context",
+        },
+    )
+
+    # sample 이후: 요약/에러 분기
+    graph_builder.add_conditional_edges(
+        "run_sample",
+        route_after_sample,
+        {"run_summarize": "run_summarize", "build_context": "build_context"},
+    )
+
+    # summarize/image/load 결과는 build_context로 모아서 통일
+    graph_builder.add_edge("run_summarize", "build_context")
+    graph_builder.add_edge("run_image_manifest", "build_context")
+    graph_builder.add_edge("run_load_and_sample", "build_context")
+
+    # build_context 이후: 오류면 friendly_error, 정상이면 generate
+    graph_builder.add_conditional_edges(
+        "build_context",
         route_after_context,
         {"friendly_error": "friendly_error", "generate": "generate"},
     )
@@ -922,6 +1178,7 @@ def run_request(
         "iterations": 0,
         "error": "",
         "context": "",
+        "context_candidate": None,
         "generation": None,
         "phase": None,
         "user_request": request,
@@ -930,6 +1187,11 @@ def run_request(
         "trace": [],
         "llm_model": llm_model,
         "coder_model": coder_model,
+        "tool_call_name": None,
+        "tool_call_args": None,
+        "inspect_result": None,
+        "sample_json": None,
+        "summary_context": None,
     }
     result = graph.invoke(initial_state)
     if isinstance(result, dict):

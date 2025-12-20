@@ -34,6 +34,12 @@ class State(MessagesState):
     output_formats: Optional[str]
     requirements: Optional[list[Requirement]] = None
     output_files: Optional[list[str]] = None
+    tool_call_name: Optional[str] = None
+    tool_call_args: Optional[dict[str, Any]] = None
+    inspect_result: Optional[dict[str, Any]] = None
+    sample_json: Optional[str] = None
+    summary_context: Optional[str] = None
+    context_candidate: Optional[str] = None
     execution_stdout: Optional[str] = None
     validation_report: Optional[dict[str, Any]] = None
     execution_workdir: Optional[str] = None

@@ -116,13 +116,30 @@ flowchart LR
 ```mermaid
 flowchart TD
   START([START]) --> R[add_requirements<br/>요구사항 추출]
-  R --> C[chatbot<br/>요청 분석 + tool call 유도]
+  R --> C[chatbot<br/>요청 분석 + tool call 결정]
 
-  C -->|tool_calls 있음| X[add_context<br/>샘플/요약 생성]
+  C -->|tool_calls 있음| X[add_context<br/>tool call 선택]
   C -->|tool_calls 없음| END([END])
 
-  X -->|ERROR_CONTEXT| FE[friendly_error<br/>에러를 한글로 요약]
-  X -->|OK| G[generate<br/>전처리 스크립트 생성]
+  X --> I[run_inspect<br/>입력 경로 검사]
+  X --> S[run_sample<br/>샘플링]
+  X --> M[run_summarize<br/>요약]
+  X --> IMG[run_image_manifest<br/>이미지 매니페스트]
+  X --> LAS[run_load_and_sample<br/>통합 샘플링]
+
+  I -->|이미지| IMG
+  I -->|테이블| S
+  I -->|오류| B[build_context<br/>컨텍스트 확정]
+
+  S -->|성공| M
+  S -->|오류| B
+
+  M --> B
+  IMG --> B
+  LAS --> B
+
+  B -->|ERROR_CONTEXT| FE[friendly_error<br/>에러를 한글로 요약]
+  B -->|OK| G[generate<br/>전처리 스크립트 생성]
 
   G --> E[code_check<br/>코드 실행]
   E -->|성공| V[validate<br/>__validation_report__ 검증]
@@ -144,8 +161,9 @@ flowchart TD
 ## 어떻게 “전처리”가 수행되나 (동작 설명)
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
-2) **샘플링/요약**: `inspect_input` → `sample_table`/`summarize_table`로 데이터(또는 폴더) 샘플·요약 컨텍스트 생성  
-3) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
+2) **요청 해석/툴 선택**: LLM이 tool call을 결정하고 실행 대상을 선택  
+3) **샘플링/요약**: `inspect_input` → `sample_table` → `summarize_table` (또는 이미지 폴더면 `list_images_to_csv`)  
+4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 4) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 5) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
 6) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
