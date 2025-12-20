@@ -128,9 +128,10 @@ flowchart TD
   D0 -->|있음| X[add_context<br/>tool call 분기]
 
   %% 복잡한 입력/샘플링 구간은 서브그래프로 묶어 요약
-  subgraph INPUT["입력/샘플링 파트 요약"]
+  subgraph INPUT[" "]
     direction TB
     X --> D1{tool 이름}
+    D1 -.-> INPUT_LABEL["입력/샘플링 파트 요약"]:::inputLabel
     D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
     D1 -->|sample_table| S[run_sample<br/>샘플링]
     D1 -->|summarize_table| M[run_summarize<br/>요약]
@@ -172,6 +173,7 @@ flowchart TD
   FFE --> END
 
   style INPUT fill:#EAF2FF22,stroke:#EAF2FF88,stroke-width:1px
+  classDef inputLabel fill:transparent,stroke:transparent,color:#C9D7EE,font-weight:600
 ```
 
 ### 노드별 역할 요약
