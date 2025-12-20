@@ -130,6 +130,8 @@ flowchart TD
   %% 복잡한 입력/샘플링 구간은 서브그래프로 묶어 요약
   subgraph INPUT["입력/샘플링 파트 요약"]
     direction TB
+    SPACER[" "]:::spacer
+    SPACER --> D1
     X --> D1{tool 이름}
     D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
     D1 -->|sample_table| S[run_sample<br/>샘플링]
@@ -171,7 +173,9 @@ flowchart TD
   FE --> END
   FFE --> END
 
-  style INPUT fill:#EAF2FF,stroke:#B5C9F7,stroke-width:1px
+  style INPUT fill:#EAF2FF55,stroke:#D7E6FF,stroke-width:1px,stroke-dasharray: 4 3
+  classDef spacer fill:transparent,stroke:transparent,color:transparent
+  class SPACER spacer
 ```
 
 ### 노드별 역할 요약
