@@ -10,20 +10,24 @@ You are a meticulous data preprocessing assistant.
 - Be memory-aware; prefer chunked CSV reads when large; avoid unnecessary copies.
 - Include all required imports.
 - Never call process-terminating functions like sys.exit/exit/quit/os._exit, and do not use argparse; the code will be executed inside a running API process.
-- If the context indicates an image folder, the manifest CSV (filepath, filename, label=parent folder) is already prepared via `list_images_to_csv`; use that CSV path for all subsequent processing/EDA.
-- If the context indicates a directory with mixed files, assume the first supported tabular file (csv/tsv/json/jsonl/parquet/feather/arrow/excel) was sampled.
+- Do NOT use __main__ guards or sys.argv-based entry points; write a top-to-bottom script only.
+- Do NOT include markdown fences or markdown headings anywhere in the output.
+- If the context indicates images and a manifest CSV is already provided, use that CSV path for subsequent processing/EDA.
+- If the context indicates a directory with mixed files, pick a supported tabular file based on context; if ambiguous, prefer the first detected supported file.
 - Default output: CSV (and Excel if explicitly requested). If the user does not specify, save CSV to ./outputs.
 - If context contains an error message instead of data preview, show it to the user and stop gracefully rather than producing code that will fail.
+- Use the data_path from Context exactly as given; do not rewrite or alter it.
+- When performing string operations on column values, handle mixed types safely (cast to str and guard nulls).
 - IMPORTANT: At the end of the script, you MUST set a JSON-serializable dict named __validation_report__ with at least:
   - ok: bool (True only if all critical requirements are satisfied)
   - issues: list[str] (empty when ok=True; describe what failed when ok=False)
   - metrics: dict (optional; counts/rates/samples that justify ok/failed)
-  If the user asks to add/fill a specific column (e.g., "특징"), include checks and metrics for:
+  If the user asks to add/fill a specific column, include checks and metrics for:
   - <column>_missing: count of nulls
   - <column>_empty: count of empty/whitespace strings
-  - <column>_placeholder (or <column>_fallback): count filled with a default placeholder such as "정보 없음"
-  Never use placeholders to hide missing coverage; if placeholder/fallback count > 0, set ok=False and include the missing keys (e.g., unique 질환명/진단명 that were not covered) in metrics.
-  Also include a short list of missing keys in metrics (e.g., missing_진단명: [...]) so a repair loop can extend coverage.
+  - <column>_placeholder (or <column>_fallback): count filled with a default placeholder such as "N/A", "unknown"
+  Never use placeholders to hide missing coverage; if placeholder/fallback count > 0, set ok=False and include the missing keys (e.g., unique values that were not covered) in metrics.
+  Also include a short list of missing keys in metrics (e.g., missing_<column>: [...]) so a repair loop can extend coverage.
 """,
         ),
         (
@@ -39,6 +43,9 @@ Context (sample + stats):
 
 User requirements (MUST satisfy ALL; do not ignore even if dataset is large):
 {requirements_prompt}
+
+Requirement IDs (MUST report all of these in __validation_report__['requirements']):
+{requirement_ids}
 
 Write a directly executable Python script that:
 1) Loads the full dataset from data_path using the appropriate loader by extension (.csv/.tsv/.parquet/.feather/.arrow/.json/.xlsx; default csv).
@@ -64,6 +71,7 @@ Validation requirements (MUST):
   - a boolean (True/False), OR
   - a dict containing at least {{ok: bool, details: str}}.
 - If ANY requirement is not satisfied, set __validation_report__['ok'] = False and include which requirement ids failed in issues.
+- You MUST include ALL requirement ids listed above. Do NOT invent new requirement ids.
 """,
         ),
     ]
@@ -77,6 +85,9 @@ reflect_prompt = ChatPromptTemplate.from_messages(
             You are given an error message that occurred while running a Python script, along with the original code that produced the error.
             Provide a corrected version of the original code that resolves the issue. 
             Ensure the code runs without errors and maintains the intended functionality.
+            Do NOT rewrite the entire script; apply minimal edits and preserve the original structure and logic.
+            Do NOT introduce __main__ guards, argparse, or sys.argv-based entry points.
+            Do NOT include markdown fences or markdown headings.
             Never create synthetic/sample data to bypass missing files. If a file is missing, fail immediately with a clear error.
             Return only code (imports + executable script) without any extra explanation text."""
         ),

@@ -364,6 +364,7 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     requirements_prompt = (state.get("requirements_prompt") or "").strip()
     requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs]) if reqs else ""
     requirements_prompt_text = requirements_prompt or requirements_list or "(none)"
+    requirement_ids = ", ".join([r.id for r in reqs]) if reqs else "(none)"
 
     generated_code = llm_coder.invoke(
         code_gen_prompt.format_messages(
@@ -371,6 +372,7 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
             user_request=user_request,
             output_formats=output_formats,
             requirements_prompt=requirements_prompt_text,
+            requirement_ids=requirement_ids,
         )
     )
     code_structurer = llm_gpt.with_structured_output(CodeBlocks)

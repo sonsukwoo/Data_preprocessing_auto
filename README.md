@@ -148,7 +148,8 @@ flowchart TD
     D1 -->|sample_table| SAS[run_sample_and_summarize<br/>샘플링+요약]
 
     I --> D2{입력 타입}
-    D2 -->|이미지| IMG[run_image_manifest<br/>이미지 매니페스트]
+    D2 -->|이미지| LIMG[list_images_to_csv<br/>(tool)]
+    LIMG --> IMG[run_image_manifest<br/>이미지 매니페스트]
     D2 -->|테이블| SAS
     D2 -->|오류| B[build_context<br/>컨텍스트 확정<br/>ERROR_CONTEXT]
 
@@ -184,7 +185,7 @@ flowchart TD
 - **add_context**: tool call 선택/기록 및 샘플링 준비
 - **run_inspect**: 입력 경로 유효성/유형(이미지 vs 테이블) 판별
 - **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성
-- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환
+- **run_image_manifest**: `list_images_to_csv`를 호출해 이미지 폴더를 CSV 매니페스트로 변환
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성
 - **generate**: 전처리 파이썬 스크립트 생성
