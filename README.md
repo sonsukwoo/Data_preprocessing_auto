@@ -113,15 +113,15 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  A[add_requirements<br/>요구사항 추출] --> B[chatbot<br/>요청 분석/도구 결정]
-  B --> C[input_summary<br/>입력·샘플링 요약]
-  C --> D{error_context?<br/>오류 컨텍스트?}
-  D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
-  D -->|아니오| E[generate<br/>코드 생성]
-  E --> F[code_check<br/>실행]
-  F --> G{validate<br/>검증}
+  A[req<br/>요구사항] --> B[chat<br/>요청/도구]
+  B --> C[input_sum<br/>입력·샘플]
+  C --> D{err_ctx?<br/>오류?}
+  D -->|예| X[err<br/>친절오류] --> H[END<br/>완료]
+  D -->|아니오| E[gen<br/>코드생성]
+  E --> F[exec<br/>실행]
+  F --> G{val<br/>검증}
   G -->|통과| H
-  G -->|실패| R[reflect<br/>리플렉트] --> E
+  G -->|실패| R[refl<br/>수정] --> E
 ```
 
 <details>
