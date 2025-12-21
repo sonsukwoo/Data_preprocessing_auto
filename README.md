@@ -122,10 +122,11 @@ flowchart TD
   D -->|아니오| E[generate<br/>코드 생성]
   E --> F[code_check<br/>실행]
   F --> FE{실행 오류?}
-  FE -->|예| R[reflect<br/>리플렉트] --> F
+  FE -->|예| R[reflect<br/>리플렉트]
   FE -->|아니오| G{validate<br/>검증}
   G -->|통과| H
-  G -->|실패| R --> F
+  G -->|실패| R
+  R --> F
 ```
 
 <details>
