@@ -418,28 +418,6 @@ def summarize_table(sample_json: str) -> str:
 
 
 @tool
-def load_and_sample(path: str, sample_size: int = 5000) -> str:
-    """호환성 유지용 래퍼(내부적으로 inspect/sample/summarize 사용)."""
-
-    info = inspect_input.invoke({"path": path})
-    if isinstance(info, str) and info.startswith("ERROR_CONTEXT||"):
-        return info
-    try:
-        parsed = json.loads(info)
-    except Exception as exc:  # noqa: BLE001
-        return f"ERROR_CONTEXT||InvalidJSON||{exc}"
-
-    if parsed.get("has_images"):
-        return list_images_to_csv.invoke({"dir_path": parsed.get("input_path", path)})
-
-    target = parsed.get("candidate_file") or parsed.get("input_path") or path
-    sample_json = sample_table.invoke({"path": target, "sample_size": sample_size})
-    if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
-        return sample_json
-    return summarize_table.invoke({"sample_json": sample_json})
-
-
-@tool
 def list_images_to_csv(
     dir_path: str,
     output_csv: str | None = None,
@@ -478,5 +456,4 @@ __all__ = [
     "sample_table",
     "summarize_table",
     "list_images_to_csv",
-    "load_and_sample",
 ]

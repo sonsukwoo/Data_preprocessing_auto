@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .models import CodeBlocks, RequirementsPayload, State
 from .prompts import code_gen_prompt, reflect_prompt
-from .tools import inspect_input, list_images_to_csv, sample_table, summarize_table, load_and_sample
+from .tools import inspect_input, list_images_to_csv, sample_table, summarize_table
 from .common_utils import (
     append_trace,
     cleanup_dir,
@@ -102,7 +102,7 @@ def add_context(state: State):
     selected: Optional[dict[str, Any]] = None
     for tc in tool_calls:
         name = tc.get("name")
-        if name in {"inspect_input", "sample_table", "summarize_table", "list_images_to_csv", "load_and_sample"}:
+        if name in {"inspect_input", "sample_table", "summarize_table", "list_images_to_csv"}:
             selected = tc
             break
 
@@ -212,68 +212,39 @@ def run_image_manifest(state: State):
     }
 
 
-# run_sample: 테이블 파일 샘플링 수행
-def run_sample(state: State):
-    """sample_table을 실행해 샘플 JSON 생성."""
+# run_sample_and_summarize: 테이블 샘플링 + 요약 통합
+def run_sample_and_summarize(state: State):
+    """sample_table + summarize_table을 한 노드에서 수행."""
     user_request = state.get("user_request", "")
     tool_name = state.get("tool_call_name")
     tool_args = state.get("tool_call_args") or {}
     context_candidate: Optional[str] = None
     sample_json: Optional[str] = None
+    summary_context: Optional[str] = None
+
     try:
-        if tool_name == "sample_table":
-            args = tool_args
+        if tool_name == "summarize_table" and tool_args.get("sample_json"):
+            summary_context = summarize_table.invoke({"sample_json": tool_args["sample_json"]})
+            context_candidate = summary_context
         else:
-            inspect_info = state.get("inspect_result") or {}
-            target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
-            sample_size = tool_args.get("sample_size", 5000)
-            args = {"path": target, "sample_size": sample_size}
-        sample_json = sample_table.invoke(args)
-        if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
-            context_candidate = sample_json
+            if tool_name == "sample_table":
+                args = tool_args
+            else:
+                inspect_info = state.get("inspect_result") or {}
+                target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
+                sample_size = tool_args.get("sample_size", 5000)
+                args = {"path": target, "sample_size": sample_size}
+            sample_json = sample_table.invoke(args)
+            if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
+                context_candidate = sample_json
+            else:
+                summary_context = summarize_table.invoke({"sample_json": sample_json})
+                context_candidate = summary_context
     except Exception as exc:  # noqa: BLE001
         context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
 
     return {
         "sample_json": sample_json,
-        "context_candidate": context_candidate,
-        "phase": "sampling",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "run_sample",
-                "phase": "sampling",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_request,
-                "context_candidate": context_candidate,
-            },
-        ),
-    }
-
-
-# run_summarize: 샘플 JSON 요약 수행
-def run_summarize(state: State):
-    """summarize_table을 실행해 컨텍스트 요약 생성."""
-    user_request = state.get("user_request", "")
-    tool_name = state.get("tool_call_name")
-    tool_args = state.get("tool_call_args") or {}
-    context_candidate: Optional[str] = None
-    summary_context: Optional[str] = None
-    try:
-        if tool_name == "summarize_table":
-            sample_json = tool_args.get("sample_json", "")
-        else:
-            sample_json = state.get("sample_json", "")
-        if not sample_json:
-            context_candidate = "ERROR_CONTEXT||MissingSample||sample_json이 비어 있습니다."
-        else:
-            summary_context = summarize_table.invoke({"sample_json": sample_json})
-            context_candidate = summary_context
-    except Exception as exc:  # noqa: BLE001
-        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
-
-    return {
         "summary_context": summary_context,
         "context_candidate": context_candidate,
         "phase": "sampling",
@@ -281,35 +252,7 @@ def run_summarize(state: State):
             state,
             {
                 "ts": now_iso(),
-                "node": "run_summarize",
-                "phase": "sampling",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_request,
-                "context_candidate": context_candidate,
-            },
-        ),
-    }
-
-
-# run_load_and_sample: 통합 샘플링(호환성 유지)
-def run_load_and_sample(state: State):
-    """load_and_sample을 실행해 컨텍스트를 직접 생성."""
-    user_request = state.get("user_request", "")
-    tool_args = state.get("tool_call_args") or {}
-    context_candidate: Optional[str] = None
-    try:
-        context_candidate = load_and_sample.invoke(tool_args)
-    except Exception as exc:  # noqa: BLE001
-        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
-
-    return {
-        "context_candidate": context_candidate,
-        "phase": "sampling",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "run_load_and_sample",
+                "node": "run_sample_and_summarize",
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "user_request": user_request,
@@ -982,14 +925,10 @@ def route_tool_call(state: State):
     tool_name = state.get("tool_call_name") or ""
     if tool_name == "inspect_input":
         return "run_inspect"
-    if tool_name == "sample_table":
-        return "run_sample"
-    if tool_name == "summarize_table":
-        return "run_summarize"
+    if tool_name in {"sample_table", "summarize_table"}:
+        return "run_sample_and_summarize"
     if tool_name == "list_images_to_csv":
         return "run_image_manifest"
-    if tool_name == "load_and_sample":
-        return "run_load_and_sample"
     return END
 
 # route_after_inspect: 검사 결과에 따라 이미지/샘플/에러 분기
@@ -1000,14 +939,7 @@ def route_after_inspect(state: State):
     info = state.get("inspect_result") or {}
     if isinstance(info, dict) and info.get("has_images"):
         return "run_image_manifest"
-    return "run_sample"
-
-# route_after_sample: 샘플링 실패 여부에 따라 요약/에러 분기
-def route_after_sample(state: State):
-    ctx = state.get("context_candidate", "")
-    if isinstance(ctx, str) and ctx.startswith("ERROR_CONTEXT||"):
-        return "build_context"
-    return "run_summarize"
+    return "run_sample_and_summarize"
 
 # route_after_context: 최종 컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기
 def route_after_context(state: State):
@@ -1067,12 +999,10 @@ def build_graph(
     graph_builder.add_node("chatbot", partial(chatbot, llm_with_tools=llm_with_tools, llm_gpt=llm_gpt))
     # tool call 선택/기록
     graph_builder.add_node("add_context", add_context)
-    # 입력 검사/샘플링/요약 단계 분리
+    # 입력 검사 + 샘플링/요약 단계 구성
     graph_builder.add_node("run_inspect", run_inspect)
     graph_builder.add_node("run_image_manifest", run_image_manifest)
-    graph_builder.add_node("run_sample", run_sample)
-    graph_builder.add_node("run_summarize", run_summarize)
-    graph_builder.add_node("run_load_and_sample", run_load_and_sample)
+    graph_builder.add_node("run_sample_and_summarize", run_sample_and_summarize)
     graph_builder.add_node("build_context", build_context)
     # 에러/코드 생성/실행/검증/리플렉트
     graph_builder.add_node("friendly_error", partial(friendly_error, llm_gpt=llm_gpt))
@@ -1100,10 +1030,8 @@ def build_graph(
         route_tool_call,
         {
             "run_inspect": "run_inspect",
-            "run_sample": "run_sample",
-            "run_summarize": "run_summarize",
+            "run_sample_and_summarize": "run_sample_and_summarize",
             "run_image_manifest": "run_image_manifest",
-            "run_load_and_sample": "run_load_and_sample",
             END: END,
         },
     )
@@ -1114,22 +1042,14 @@ def build_graph(
         route_after_inspect,
         {
             "run_image_manifest": "run_image_manifest",
-            "run_sample": "run_sample",
+            "run_sample_and_summarize": "run_sample_and_summarize",
             "build_context": "build_context",
         },
     )
 
-    # sample 이후: 요약/에러 분기
-    graph_builder.add_conditional_edges(
-        "run_sample",
-        route_after_sample,
-        {"run_summarize": "run_summarize", "build_context": "build_context"},
-    )
-
-    # summarize/image/load 결과는 build_context로 모아서 통일
-    graph_builder.add_edge("run_summarize", "build_context")
+    # sample+summarize/image 결과는 build_context로 모아서 통일
+    graph_builder.add_edge("run_sample_and_summarize", "build_context")
     graph_builder.add_edge("run_image_manifest", "build_context")
-    graph_builder.add_edge("run_load_and_sample", "build_context")
 
     # build_context 이후: 오류면 friendly_error, 정상이면 generate
     graph_builder.add_conditional_edges(

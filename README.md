@@ -130,7 +130,7 @@ flowchart TD
 <summary>상세 그래프 / 노드 설명 보기</summary>
 
 각 단계의 책임을 분리해 **실패 지점 추적·재시도·확장**을 쉽게 하기 위한 구조입니다.  
-예를 들어 `inspect → sample → summarize`를 분리하면 **어디서 실패했는지 trace만으로 즉시 확인**할 수 있고,  
+예를 들어 `inspect`와 `sample+summarize`를 분리하면 **어디서 실패했는지 trace만으로 즉시 확인**할 수 있고,  
 이미지 폴더/테이블/경로 오류 같은 **입력 유형별 분기**도 명확히 유지됩니다.
 
 ```mermaid
@@ -145,23 +145,17 @@ flowchart TD
     direction TB
     X --> D1{tool 이름}
     D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
-    D1 -->|sample_table| S[run_sample<br/>샘플링]
-    D1 -->|summarize_table| M[run_summarize<br/>요약]
+    D1 -->|sample_table| SAS[run_sample_and_summarize<br/>샘플링+요약]
+    D1 -->|summarize_table| SAS
     D1 -->|list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
-    D1 -->|load_and_sample| LAS[run_load_and_sample<br/>통합 샘플링]
 
     I --> D2{입력 타입}
     D2 -->|이미지| IMG
-    D2 -->|테이블| S
+    D2 -->|테이블| SAS
     D2 -->|오류| B[build_context<br/>컨텍스트 확정]
 
-    S --> D3{샘플 성공?}
-    D3 -->|성공| M
-    D3 -->|오류| B
-
-    M --> B
+    SAS --> B
     IMG --> B
-    LAS --> B
   end
 
   B --> D4{ERROR_CONTEXT?}
@@ -191,10 +185,8 @@ flowchart TD
 - **chatbot**: LLM이 요청 분석, 요구사항 정리, tool call 결정
 - **add_context**: tool call 선택/기록 및 샘플링 준비
 - **run_inspect**: 입력 경로 유효성/유형(이미지 vs 테이블) 판별
-- **run_sample**: 테이블 샘플링 수행
-- **run_summarize**: 샘플 요약(결측/분포/예시) 생성
+- **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성
 - **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환
-- **run_load_and_sample**: inspect → sample → summarize 통합 처리
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성
 - **generate**: 전처리 파이썬 스크립트 생성
@@ -213,7 +205,7 @@ flowchart TD
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
 2) **요청 해석/툴 선택**: LLM이 tool call을 결정하고 실행 대상을 선택  
-3) **샘플링/요약**: `inspect_input` → `sample_table` → `summarize_table` (또는 이미지 폴더면 `list_images_to_csv`, 필요 시 `load_and_sample`)  
+3) **샘플링/요약**: `inspect_input` → `sample_table` → `summarize_table` (또는 이미지 폴더면 `list_images_to_csv`)  
 4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 5) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 6) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
@@ -268,8 +260,8 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - `run_<run_id>_internal_trace_내부기록.md`
 
 포함 내용:
-- 단계별 타임라인 (`chatbot → add_context → run_inspect/run_sample/run_summarize → build_context → generate → code_check → validate → reflect`)
-- 입력 유형에 따라 `run_image_manifest` 또는 `run_load_and_sample` 경로로 분기될 수 있음
+- 단계별 타임라인 (`chatbot → add_context → run_inspect/run_sample_and_summarize → build_context → generate → code_check → validate → reflect`)
+- 입력 유형에 따라 `run_image_manifest` 경로로 분기될 수 있음
 - 각 iteration에서 생성된 코드(imports + script)
 - 실행 오류(traceback), stdout, validation report
 - 샘플링 결과 요약
