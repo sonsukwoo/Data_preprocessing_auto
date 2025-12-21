@@ -148,7 +148,7 @@ flowchart TD
     D1 -->|sample_table| SAS[run_sample_and_summarize<br/>샘플링+요약]
 
     I --> D2{입력 타입}
-    D2 -->|이미지| LIMG[list_images_to_csv<br/>(tool)]
+    D2 -->|이미지| LIMG[list_images_to_csv]
     LIMG --> IMG[run_image_manifest<br/>이미지 매니페스트]
     D2 -->|테이블| SAS
     D2 -->|오류| B[build_context<br/>컨텍스트 확정<br/>ERROR_CONTEXT]
