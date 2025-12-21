@@ -117,7 +117,7 @@ S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 
 ```mermaid
 flowchart TD
   B[chatbot<br/>요청 분석/요구사항 정리/도구 결정] --> C[build_context<br/>데이터 샘플링 및 요약]
-  C --> D{error_context?<br/>오류 컨텍스트?}
+  C --> D{?<br/>오류 컨텍스트?}
   D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
   D -->|아니오| E[generate<br/>코드 생성]
   E --> F[code_check<br/>실행]
