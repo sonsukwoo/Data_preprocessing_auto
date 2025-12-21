@@ -113,15 +113,15 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  A[요구사항 추출] --> B[요청 분석/도구 결정]
-  B --> C[입력·샘플링 요약]
-  C --> D{ERROR_CONTEXT?}
-  D -->|아니오| E[코드 생성]
-  E --> F[실행]
-  F --> G{검증}
-  G -->|통과| H[완료]
-  G -->|실패| R[리플렉트] --> E
-  D -->|예| X[친절 오류] --> H
+  A[add_requirements<br/>요구사항 추출] --> B[chatbot<br/>요청 분석/도구 결정]
+  B --> C[input_summary<br/>입력·샘플링 요약]
+  C --> D{error_context?<br/>오류 컨텍스트?}
+  D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
+  D -->|아니오| E[generate<br/>코드 생성]
+  E --> F[code_check<br/>실행]
+  F --> G{validate<br/>검증}
+  G -->|통과| H
+  G -->|실패| R[reflect<br/>리플렉트] --> E
 ```
 
 <details>
@@ -133,23 +133,57 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  subgraph L1[" "]
-    direction LR
-    R[add_requirements<br/>요구사항 추출] --> C[chatbot<br/>요청 분석/도구 결정] --> S[input_summary<br/>입력·샘플링 요약] --> D{error_context?<br/>오류 컨텍스트?}
+  START([START]) --> R[add_requirements<br/>요구사항 추출]
+  R --> C[chatbot<br/>요청 분석 + tool call 결정]
+
+  C --> D0{tool_calls 있음?}
+  D0 -->|없음| END([END])
+  D0 -->|있음| X[add_context<br/>tool call 분기]
+
+  subgraph INPUT["입력/샘플링 파트"]
+    direction TB
+    X --> D1{tool 이름}
+    D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
+    D1 -->|sample_table| S[run_sample<br/>샘플링]
+    D1 -->|summarize_table| M[run_summarize<br/>요약]
+    D1 -->|list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
+    D1 -->|load_and_sample| LAS[run_load_and_sample<br/>통합 샘플링]
+
+    I --> D2{입력 타입}
+    D2 -->|이미지| IMG
+    D2 -->|테이블| S
+    D2 -->|오류| B[build_context<br/>컨텍스트 확정]
+
+    S --> D3{샘플 성공?}
+    D3 -->|성공| M
+    D3 -->|오류| B
+
+    M --> B
+    IMG --> B
+    LAS --> B
   end
 
-  subgraph L2[" "]
-    direction LR
-    G[generate<br/>코드 생성] --> E[code_check<br/>실행] --> V{validate<br/>검증}
-  end
+  B --> D4{ERROR_CONTEXT?}
+  D4 -->|예| FE[friendly_error<br/>에러를 한글로 요약]
+  D4 -->|아니오| G[generate<br/>전처리 스크립트 생성]
 
-  D -->|아니오| G
-  D -->|예| FE[friendly_error<br/>친절 오류] --> END([완료])
+  G --> E[code_check<br/>코드 실행]
+  E --> D5{실행 성공?}
+  D5 -->|성공| V[validate<br/>__validation_report__ 검증]
+  D5 -->|실패| D{max_iterations?}
 
-  V -->|통과| END
-  V -->|실패| RF[reflect<br/>리플렉트]
-  RF --> G
+  V --> D6{검증 통과?}
+  D6 -->|통과| END
+  D6 -->|실패| D
+
+  D -->|남음| RF[reflect<br/>오류 기반 수정]
+  D -->|초과| FFE[final_friendly_error<br/>최종 실패 요약]
+
+  RF --> E
+  FE --> END
+  FFE --> END
 ```
+
 
 
 ### 노드별 역할 요약
