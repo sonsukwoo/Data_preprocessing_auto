@@ -97,7 +97,7 @@ flowchart LR
   U["User Browser"] -->|"HTTP 8080"| N["Nginx front"]
   N -->|"API proxy"| A["FastAPI backend 8000"]
   A --> G["LangGraph Agent"]
-  G -->|"tool call"| T["inspect_input / sample_table / summarize_table / list_images_to_csv"]
+  G -->|"tool call"| T["inspect_input / sample_table / list_images_to_csv"]
   G -->|"generate code"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
@@ -146,11 +146,9 @@ flowchart TD
     X --> D1{tool 이름}
     D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
     D1 -->|sample_table| SAS[run_sample_and_summarize<br/>샘플링+요약]
-    D1 -->|summarize_table| SAS
-    D1 -->|list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
 
     I --> D2{입력 타입}
-    D2 -->|이미지| IMG
+    D2 -->|이미지| IMG[run_image_manifest<br/>이미지 매니페스트]
     D2 -->|테이블| SAS
     D2 -->|오류| B[build_context<br/>컨텍스트 확정<br/>ERROR_CONTEXT]
 
@@ -205,7 +203,7 @@ flowchart TD
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
 2) **요청 해석/툴 선택**: LLM이 tool call을 결정하고 실행 대상을 선택  
-3) **샘플링/요약**: `inspect_input` → `sample_table` → `summarize_table` (또는 이미지 폴더면 `list_images_to_csv`)  
+3) **샘플링/요약**: `inspect_input` → `sample_table` → (내부 요약) (또는 이미지 폴더면 `list_images_to_csv`)  
 4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 5) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 6) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  

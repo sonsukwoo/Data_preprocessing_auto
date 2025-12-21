@@ -40,7 +40,7 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
         "You can call tools. If the user message contains a local filesystem path, you MUST call "
         "`inspect_input` with that path first. "
         "If it is an image folder, use `list_images_to_csv`. "
-        "Otherwise, you can call `sample_table` and then `summarize_table`."
+        "Otherwise, use `sample_table`."
     )
     response = llm_with_tools.invoke([("system", system), *state["messages"]])
     user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
@@ -102,7 +102,7 @@ def add_context(state: State):
     selected: Optional[dict[str, Any]] = None
     for tc in tool_calls:
         name = tc.get("name")
-        if name in {"inspect_input", "sample_table", "summarize_table", "list_images_to_csv"}:
+        if name in {"inspect_input", "sample_table", "list_images_to_csv"}:
             selected = tc
             break
 
@@ -223,23 +223,19 @@ def run_sample_and_summarize(state: State):
     summary_context: Optional[str] = None
 
     try:
-        if tool_name == "summarize_table" and tool_args.get("sample_json"):
-            summary_context = summarize_table.invoke({"sample_json": tool_args["sample_json"]})
-            context_candidate = summary_context
+        if tool_name == "sample_table":
+            args = tool_args
         else:
-            if tool_name == "sample_table":
-                args = tool_args
-            else:
-                inspect_info = state.get("inspect_result") or {}
-                target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
-                sample_size = tool_args.get("sample_size", 5000)
-                args = {"path": target, "sample_size": sample_size}
-            sample_json = sample_table.invoke(args)
-            if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
-                context_candidate = sample_json
-            else:
-                summary_context = summarize_table.invoke({"sample_json": sample_json})
-                context_candidate = summary_context
+            inspect_info = state.get("inspect_result") or {}
+            target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
+            sample_size = tool_args.get("sample_size", 5000)
+            args = {"path": target, "sample_size": sample_size}
+        sample_json = sample_table.invoke(args)
+        if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
+            context_candidate = sample_json
+        else:
+            summary_context = summarize_table.invoke({"sample_json": sample_json})
+            context_candidate = summary_context
     except Exception as exc:  # noqa: BLE001
         context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
 
@@ -925,7 +921,7 @@ def route_tool_call(state: State):
     tool_name = state.get("tool_call_name") or ""
     if tool_name == "inspect_input":
         return "run_inspect"
-    if tool_name in {"sample_table", "summarize_table"}:
+    if tool_name == "sample_table":
         return "run_sample_and_summarize"
     if tool_name == "list_images_to_csv":
         return "run_image_manifest"
@@ -989,7 +985,7 @@ def build_graph(
     llm_gpt = ChatOpenAI(model=llm_model)
     llm_coder = ChatOpenAI(model=coder_model, temperature=0)
     llm_with_tools = llm_gpt.bind_tools(
-        tools=[inspect_input, sample_table, summarize_table, list_images_to_csv]
+        tools=[inspect_input, sample_table, list_images_to_csv]
     )
 
     graph_builder = StateGraph(State)
