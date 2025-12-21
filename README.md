@@ -101,8 +101,11 @@ flowchart LR
   G -->|"generate code"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
-  A -->|"optional"| S3["S3 bucket"]
+  A -->|"presign + optional download"| S3["S3 bucket"]
+  U -->|"presigned upload (optional)"| S3
 ```
+
+S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 FastAPI는 **presign 발급 + 필요 시 S3에서 다운로드/경로 변환**을 수행합니다.
 
 ### LangGraph 처리 흐름(핵심)
 
@@ -113,7 +116,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  B[chatbot<br/>요청 분석/요구사항 정리/도구 결정] --> C[build_context<br/>입력·샘플링 요약/확정]
+  B[chatbot<br/>요청 분석/요구사항 정리/도구 결정] --> C[build_context<br/>데이터 샘플링 및 요약]
   C --> D{error_context?<br/>오류 컨텍스트?}
   D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
   D -->|아니오| E[generate<br/>코드 생성]
@@ -138,7 +141,7 @@ flowchart TD
   D0 -->|없음| END([END])
   D0 -->|있음| X[add_context<br/>tool call 분기]
 
-  subgraph INPUT["입력/샘플링 파트"]
+  subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
     X --> D1{tool 이름}
     D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
