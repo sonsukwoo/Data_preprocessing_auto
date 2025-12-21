@@ -152,7 +152,7 @@ flowchart TD
     I --> D2{입력 타입}
     D2 -->|이미지| IMG
     D2 -->|테이블| SAS
-    D2 -->|오류| B[build_context<br/>컨텍스트 확정 (ERROR_CONTEXT)]
+    D2 -->|오류| B[build_context<br/>컨텍스트 확정<br/>ERROR_CONTEXT]
 
     SAS --> B
     IMG --> B
