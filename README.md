@@ -112,7 +112,7 @@ flowchart LR
 아래는 **축약 버전(입력/샘플링 파트 요약)** 입니다.
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[add_requirements<br/>요구사항 추출] --> B[chatbot<br/>요청 분석/도구 결정]
   B --> C[input_summary<br/>입력·샘플링 요약]
   C --> D{error_context?<br/>오류 컨텍스트?}
