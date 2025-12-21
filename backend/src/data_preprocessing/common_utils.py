@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .models import Requirement, State
+from .models import State
 
 # ========================== 시간/경로 유틸 ==========================
 def now_iso() -> str:
@@ -73,50 +73,6 @@ def safe_format_json_like(obj: object, limit: int = 6000) -> str:
         return truncate_text(json.dumps(obj, ensure_ascii=False, indent=2), limit=limit)
     except Exception as exc:  # noqa: BLE001
         return truncate_text(f"<non-json-serializable: {type(exc).__name__}: {exc}>\n{repr(obj)}", limit=limit)
-
-
-def strip_paths_and_quotes(text: str) -> str:
-    # 실행 가능한 요구사항이 아닌, 명백한 파일 경로/주소(URI) 토큰을 제거
-    s = text
-    s = re.sub(r"s3://\S+", " ", s)
-    # 주의: 과도하게 제거하지 않도록 보수적으로 처리(경로처럼 보이는 토큰만 제거)
-    s = re.sub(r"(?:[A-Za-z]:\\|/)\S+", " ", s)
-    s = s.replace('"', " ").replace("'", " ")
-    return s
-
-
-def extract_requirements_from_user_request(user_request: str, max_items: int = 10) -> list[Requirement]:
-    """요구사항 누락(silent miss)을 줄이기 위한, 규칙 기반(결정적) 요구사항 추출(best-effort).
-
-    토큰 사용을 줄이기 위해 의도적으로 단순하게 유지(추가 LLM 호출 없음).
-    """
-    text = (user_request or "").strip()
-    if not text:
-        return []
-
-    text = strip_paths_and_quotes(text)
-    # 흔한 구분자(한글 접속사 + 구두점)로 분리
-    parts = re.split(r"[\n\r]+|[.;!?]+|,|\b그리고\b|\b및\b|\b또는\b|\b또\b|\b또한\b|\b추가로\b", text)
-    cleaned: list[str] = []
-    for p in parts:
-        t = re.sub(r"\s+", " ", p).strip()
-        if len(t) < 2:
-            continue
-        cleaned.append(t)
-
-    # 순서를 유지하면서 중복 제거
-    uniq: list[str] = []
-    seen: set[str] = set()
-    for t in cleaned:
-        key = t.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(t)
-        if len(uniq) >= max_items:
-            break
-
-    return [Requirement(id=f"REQ-{i+1}", text=t, severity="must") for i, t in enumerate(uniq)]
 
 
 def detect_sample_fallback(code: str) -> str | None:
@@ -510,14 +466,12 @@ __all__ = [
     "detect_sample_fallback",
     "diff_generation",
     "extract_last_message_text",
-    "extract_requirements_from_user_request",
     "extract_user_request",
     "now_iso",
     "outputs_root_dir",
     "promote_staged_outputs",
     "safe_format_json_like",
     "safe_last_message",
-    "strip_paths_and_quotes",
     "truncate_text",
     "write_internal_trace_markdown",
 ]

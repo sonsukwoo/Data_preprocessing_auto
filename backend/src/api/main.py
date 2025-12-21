@@ -849,7 +849,6 @@ def run_stream(body: RunRequest) -> StreamingResponse:
             node_to_stage = {
                 "chatbot": ("analyzing", "요청/데이터 분석 중"),
                 "add_context": ("sampling", "데이터 샘플링 중"),
-                "add_requirements": ("analyzing", "요구사항 정리 중"),
                 "generate": ("generating", "스크립트 생성 중"),
                 "code_check": ("executing", "스크립트 실행 중"),
                 "reflect": ("refactoring", "리팩트 중"),

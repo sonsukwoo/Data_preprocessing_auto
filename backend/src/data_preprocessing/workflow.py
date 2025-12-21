@@ -13,7 +13,7 @@ from uuid import uuid4
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from .models import CodeBlocks, State
+from .models import CodeBlocks, RequirementsPayload, State
 from .prompts import code_gen_prompt, reflect_prompt
 from .tools import inspect_input, list_images_to_csv, sample_table, summarize_table, load_and_sample
 from .common_utils import (
@@ -21,7 +21,6 @@ from .common_utils import (
     cleanup_dir,
     detect_sample_fallback,
     extract_last_message_text,
-    extract_requirements_from_user_request,
     extract_user_request,
     now_iso,
     outputs_root_dir,
@@ -33,30 +32,10 @@ from .common_utils import (
 )
 
 
-def add_requirements(state: State):
-    """사용자 요청에서 요구사항을 뽑아 state에 저장."""
-    user_request = state.get("user_request", "")
-    reqs = extract_requirements_from_user_request(user_request)
-    return {
-        "requirements": reqs,
-        "phase": "analyzing",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "add_requirements",
-                "phase": "analyzing",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_request,
-                "requirements": [r.model_dump() for r in reqs],
-            },
-        ),
-    }
-
 # ========================== 노드 함수: 실제 작업을 수행하는 노드 정의 ==================================
-# chatbot: 첫 LLM 호출 + 툴 호출 유도, 사용자 요청 저장
-def chatbot(state: State, llm_with_tools: ChatOpenAI):
-    """첫 번째 LLM 호출 및 user_request 유지."""
+# chatbot: 첫 LLM 호출 + 요구사항 추출 + 툴 호출 유도, 사용자 요청 저장
+def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
+    """첫 번째 LLM 호출 + 요구사항 추출 + user_request 유지."""
     system = (
         "You can call tools. If the user message contains a local filesystem path, you MUST call "
         "`inspect_input` with that path first. "
@@ -65,9 +44,34 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI):
     )
     response = llm_with_tools.invoke([("system", system), *state["messages"]])
     user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
+
+    reqs = []
+    requirements_prompt = ""
+    reqs_error = None
+    try:
+        requirements_system = (
+            "사용자 요청에서 요구사항을 구조화해 추출하세요.\n"
+            "- 요구사항은 사용자의 언어를 유지하세요.\n"
+            "- 새로운 요구사항을 추가하지 마세요.\n"
+            "- 파일 경로/URL/ID 같은 부수 정보는 요구사항에서 제외하세요.\n"
+            "- 각 요구사항은 짧은 동사형 문장으로 작성하세요.\n"
+            "- 중복은 제거하고 최대 10개만 포함하세요.\n"
+            "- requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.\n"
+            "- 출력은 지정된 스키마에 맞는 JSON만 반환하세요."
+        )
+        structurer = llm_gpt.with_structured_output(RequirementsPayload)
+        payload = structurer.invoke([("system", requirements_system), ("user", user_req)])
+        if isinstance(payload, RequirementsPayload):
+            reqs = payload.requirements or []
+            requirements_prompt = (payload.requirements_prompt or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        reqs_error = f"{type(exc).__name__}: {exc}"
+
     return {
         "messages": [response],
         "user_request": user_req,
+        "requirements": reqs,
+        "requirements_prompt": requirements_prompt or None,
         "phase": "analyzing",
         **append_trace(
             state,
@@ -77,6 +81,9 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI):
                 "phase": "analyzing",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "user_request": user_req,
+                "requirements": [r.model_dump() for r in reqs],
+                "requirements_prompt": requirements_prompt or None,
+                "requirements_error": reqs_error,
                 "tool_calls": getattr(response, "tool_calls", None),
                 "assistant_message": getattr(response, "content", None),
             },
@@ -415,14 +422,16 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     user_request = state.get("user_request", "")
     output_formats = state.get("output_formats") or "csv"
     reqs = state.get("requirements") or []
-    requirements_text = "\n".join([f"- {r.id}: {r.text}" for r in reqs]) if reqs else "(none)"
+    requirements_prompt = (state.get("requirements_prompt") or "").strip()
+    requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs]) if reqs else ""
+    requirements_prompt_text = requirements_prompt or requirements_list or "(none)"
 
     generated_code = llm_coder.invoke(
         code_gen_prompt.format_messages(
             context=context,
             user_request=user_request,
             output_formats=output_formats,
-            requirements=requirements_text,
+            requirements_prompt=requirements_prompt_text,
         )
     )
     code_structurer = llm_gpt.with_structured_output(CodeBlocks)
@@ -1054,10 +1063,8 @@ def build_graph(
     graph_builder = StateGraph(State)
 
     # ===== 노드: 그래프에 노드 추가 =====
-    # 요구사항 추출
-    graph_builder.add_node("add_requirements", add_requirements)
     # 요청 해석 + tool call 결정
-    graph_builder.add_node("chatbot", partial(chatbot, llm_with_tools=llm_with_tools))
+    graph_builder.add_node("chatbot", partial(chatbot, llm_with_tools=llm_with_tools, llm_gpt=llm_gpt))
     # tool call 선택/기록
     graph_builder.add_node("add_context", add_context)
     # 입력 검사/샘플링/요약 단계 분리
@@ -1078,8 +1085,7 @@ def build_graph(
 
 
     # ===== 엣지: 노드 연결 정의 =====
-    graph_builder.add_edge(START, "add_requirements")
-    graph_builder.add_edge("add_requirements", "chatbot")
+    graph_builder.add_edge(START, "chatbot")
 
     # chatbot 이후: 툴 호출이 있으면 add_context, 없으면 END
     graph_builder.add_conditional_edges(

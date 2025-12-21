@@ -106,15 +106,14 @@ flowchart LR
 
 ### LangGraph 처리 흐름(핵심)
 
-에이전트는 “요구사항 정리 → 데이터 샘플링 → 코드 생성 → 실행 → 검증”을 수행하고,
+에이전트는 “요구사항 정리(LLM) → 데이터 샘플링 → 코드 생성 → 실행 → 검증”을 수행하고,
 실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.
 
 아래는 **축약 버전(입력/샘플링 파트 요약)** 입니다.
 
 ```mermaid
 flowchart TD
-  A[add_requirements<br/>요구사항 추출] --> B[chatbot<br/>요청 분석/도구 결정]
-  B --> C[input_summary<br/>입력·샘플링 요약]
+  B[chatbot<br/>요청 분석/요구사항 정리/도구 결정] --> C[build_context<br/>입력·샘플링 요약/확정]
   C --> D{error_context?<br/>오류 컨텍스트?}
   D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
   D -->|아니오| E[generate<br/>코드 생성]
@@ -133,8 +132,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  START([START]) --> R[add_requirements<br/>요구사항 추출]
-  R --> C[chatbot<br/>요청 분석 + tool call 결정]
+  START([START]) --> C[chatbot<br/>요청 분석 + 요구사항 정리 + tool call 결정]
 
   C --> D0{tool_calls 있음?}
   D0 -->|없음| END([END])
@@ -187,9 +185,8 @@ flowchart TD
 
 
 ### 노드별 역할 요약
-- **add_requirements**: 사용자 요청에서 요구사항을 구조화해 추출
-- **chatbot**: 요청 분석 및 tool call 결정
-- **add_context**: tool 실행 결과를 통합해 context 생성
+- **chatbot**: LLM이 요청 분석, 요구사항 정리, tool call 결정
+- **add_context**: tool call 선택/기록 및 샘플링 준비
 - **run_inspect**: 입력 경로 유효성/유형(이미지 vs 테이블) 판별
 - **run_sample**: 테이블 샘플링 수행
 - **run_summarize**: 샘플 요약(결측/분포/예시) 생성
@@ -268,7 +265,7 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - `run_<run_id>_internal_trace_내부기록.md`
 
 포함 내용:
-- 단계별 타임라인 (`add_requirements → chatbot → add_context → run_inspect/run_sample/run_summarize → build_context → generate → code_check → validate → reflect`)
+- 단계별 타임라인 (`chatbot → add_context → run_inspect/run_sample/run_summarize → build_context → generate → code_check → validate → reflect`)
 - 입력 유형에 따라 `run_image_manifest` 또는 `run_load_and_sample` 경로로 분기될 수 있음
 - 각 iteration에서 생성된 코드(imports + script)
 - 실행 오류(traceback), stdout, validation report

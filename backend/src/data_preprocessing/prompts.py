@@ -38,7 +38,7 @@ Context (sample + stats):
 {context}
 
 User requirements (MUST satisfy ALL; do not ignore even if dataset is large):
-{requirements}
+{requirements_prompt}
 
 Write a directly executable Python script that:
 1) Loads the full dataset from data_path using the appropriate loader by extension (.csv/.tsv/.parquet/.feather/.arrow/.json/.xlsx; default csv).

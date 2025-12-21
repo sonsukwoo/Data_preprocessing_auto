@@ -14,6 +14,16 @@ class Requirement(BaseModel):
     severity: Literal["must", "should"] = Field(default="must", description="Whether this requirement must pass")
 
 
+class RequirementsPayload(BaseModel):
+    """LLM이 추출한 요구사항 구조."""
+
+    requirements: list[Requirement] = Field(default_factory=list)
+    requirements_prompt: str = Field(
+        default="",
+        description="Code-generation-friendly summary of user requirements",
+    )
+
+
 class CodeBlocks(BaseModel):
     """LLM이 생성한 코드를 구조화해 담는 모델."""
 
@@ -33,6 +43,7 @@ class State(MessagesState):
     user_request: str
     output_formats: Optional[str]
     requirements: Optional[list[Requirement]] = None
+    requirements_prompt: Optional[str] = None
     output_files: Optional[list[str]] = None
     tool_call_name: Optional[str] = None
     tool_call_args: Optional[dict[str, Any]] = None
@@ -47,4 +58,4 @@ class State(MessagesState):
     trace: Optional[list[dict[str, Any]]] = None
 
 
-__all__ = ["Requirement", "CodeBlocks", "State"]
+__all__ = ["Requirement", "RequirementsPayload", "CodeBlocks", "State"]
