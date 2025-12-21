@@ -37,10 +37,10 @@ from .common_utils import (
 def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
     """첫 번째 LLM 호출 + 요구사항 추출 + user_request 유지."""
     system = (
-        "You can call tools. If the user message contains a local filesystem path, you MUST call "
-        "`inspect_input` with that path first. "
-        "If it is an image folder, use `list_images_to_csv`. "
-        "Otherwise, use `sample_table`."
+        "You can call tools. Choose the most appropriate tool based on the request:\n"
+        "- If the input is an image folder (explicitly mentioned), call `list_images_to_csv`.\n"
+        "- If the input is a tabular file/folder, call `sample_table`.\n"
+        "- Use `inspect_input` only when the input type is unclear and you need to check the path."
     )
     response = llm_with_tools.invoke([("system", system), *state["messages"]])
     user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
@@ -155,6 +155,11 @@ def run_inspect(state: State):
             else:
                 if isinstance(parsed, dict):
                     inspect_info = parsed
+                    if not inspect_info.get("has_images"):
+                        context_candidate = (
+                            "ERROR_CONTEXT||NonImageInput||"
+                            "inspect_input은 이미지 폴더 확인용입니다. 테이블은 sample_table을 사용하세요."
+                        )
                 else:
                     context_candidate = "ERROR_CONTEXT||InvalidPayload||inspect_input 결과가 dict가 아닙니다."
     except Exception as exc:  # noqa: BLE001
@@ -937,7 +942,7 @@ def route_after_inspect(state: State):
     info = state.get("inspect_result") or {}
     if isinstance(info, dict) and info.get("has_images"):
         return "run_image_manifest"
-    return "run_sample_and_summarize"
+    return "build_context"
 
 # route_after_context: 최종 컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기
 def route_after_context(state: State):
@@ -1040,7 +1045,6 @@ def build_graph(
         route_after_inspect,
         {
             "run_image_manifest": "run_image_manifest",
-            "run_sample_and_summarize": "run_sample_and_summarize",
             "build_context": "build_context",
         },
     )

@@ -147,13 +147,12 @@ flowchart TD
   subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
     X --> D1{tool 이름}
-    D1 -->|inspect_input| I[run_inspect<br/>입력 경로 검사]
+    D1 -->|inspect_input| I[run_inspect<br/>이미지 폴더 여부 검사]
     D1 -->|sample_table| SAS[run_sample_and_summarize<br/>샘플링+요약]
 
     I --> D2{입력 타입}
     D2 -->|이미지 / list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
-    D2 -->|테이블| SAS
-    D2 -->|오류| B[build_context<br/>컨텍스트 확정<br/>]
+    D2 -->|이미지 없음| B[build_context<br/>컨텍스트 확정<br/>]
 
     SAS --> B
     IMG --> B
@@ -185,7 +184,7 @@ flowchart TD
 ### 노드별 역할 요약
 - **chatbot**: LLM이 요청 분석, 요구사항 정리, tool call 결정
 - **add_context**: tool call 선택/기록 및 샘플링 준비
-- **run_inspect**: 입력 경로 유효성/유형(이미지 vs 테이블) 판별
+- **run_inspect**: 입력 경로 검사(이미지 폴더 여부 확인)
 - **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성
 - **run_image_manifest**: `list_images_to_csv`를 호출해 이미지 폴더를 CSV 매니페스트로 변환
 - **build_context**: context 확정 및 오류 컨텍스트 설정
@@ -206,7 +205,7 @@ flowchart TD
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
 2) **요청 해석/툴 선택**: LLM이 tool call을 결정하고 실행 대상을 선택  
-3) **샘플링/요약**: `inspect_input` → `sample_table` → (내부 요약) (또는 이미지 폴더면 `list_images_to_csv`)  
+3) **샘플링/요약**: `sample_table` → (내부 요약). 이미지 폴더면 `list_images_to_csv`, 입력 타입이 불확실하면 `inspect_input`으로 확인  
 4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 5) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 6) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
