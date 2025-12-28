@@ -97,7 +97,8 @@ flowchart LR
   U["User Browser"] -->|"HTTP 8080"| N["Nginx front"]
   N -->|"API proxy"| A["FastAPI backend 8000"]
   A --> G["LangGraph Agent"]
-  G -->|"tool call"| T["inspect_input / sample_table / list_images_to_csv"]
+  G -->|"inspect + fixed routing"| T["inspect_input"]
+  T -->|"route"| S["sample_table / list_images_to_csv"]
   G -->|"generate code"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
@@ -109,14 +110,15 @@ S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 
 
 ### LangGraph 처리 흐름(핵심)
 
-에이전트는 “요구사항 정리(LLM) → 데이터 샘플링 → 코드 생성 → 실행 → 검증”을 수행하고,
+에이전트는 “요구사항 정리(LLM) → 입력 검사 → 데이터 샘플링/요약 → 코드 생성 → 실행 → 검증”을 수행하고,
 실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.
 
 아래는 **축약 버전(입력/샘플링 파트 요약)** 입니다.
 
 ```mermaid
 flowchart TD
-  B[chatbot<br/>요청 분석/요구사항 정리/도구 결정] --> C[build_context<br/>데이터 샘플링 및 요약]
+  B[chatbot<br/>요청 분석/요구사항 정리] --> I[inspect_input_node<br/>입력 경로 검사]
+  I --> C[build_context<br/>데이터 샘플링 및 요약]
   C --> D{error_context?<br/>오류 컨텍스트?}
   D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
   D -->|아니오| E[generate<br/>코드 생성]
@@ -133,26 +135,20 @@ flowchart TD
 <summary>상세 그래프 / 노드 설명 보기</summary>
 
 각 단계의 책임을 분리해 **실패 지점 추적·재시도·확장**을 쉽게 하기 위한 구조입니다.  
-예를 들어 `inspect`와 `sample+summarize`를 분리하면 **어디서 실패했는지 trace만으로 즉시 확인**할 수 있고,  
+예를 들어 `inspect_input_node`에서 입력을 먼저 고정 로직으로 판별하면 **툴 선택 오류를 줄이고**,  
 이미지 폴더/테이블/경로 오류 같은 **입력 유형별 분기**도 명확히 유지됩니다.
 
 ```mermaid
 flowchart TD
-  START([START]) --> C[chatbot<br/>요청 분석 + 요구사항 정리 + tool call 결정]
-
-  C --> D0{tool_calls 있음?}
-  D0 -->|없음| END([END])
-  D0 -->|있음| X[add_context<br/>tool call 분기]
+  START([START]) --> C[chatbot<br/>요청 분석 + 요구사항 정리]
+  C --> I0[inspect_input_node<br/>입력 경로 검사]
 
   subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
-    X --> D1{tool 이름}
-    D1 -->|inspect_input| I[run_inspect<br/>이미지 폴더 여부 검사]
-    D1 -->|sample_table| SAS[run_sample_and_summarize<br/>샘플링+요약]
-
-    I --> D2{입력 타입}
-    D2 -->|이미지 / list_images_to_csv| IMG[run_image_manifest<br/>이미지 매니페스트]
-    D2 -->|이미지 없음| B[build_context<br/>컨텍스트 확정<br/>]
+    I0 --> D1{입력 타입}
+    D1 -->|이미지 폴더| IMG[run_image_manifest<br/>이미지 매니페스트]
+    D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize<br/>샘플링+요약]
+    D1 -->|오류| B[build_context<br/>컨텍스트 확정<br/>]
 
     SAS --> B
     IMG --> B
@@ -182,9 +178,8 @@ flowchart TD
 
 
 ### 노드별 역할 요약
-- **chatbot**: LLM이 요청 분석, 요구사항 정리, tool call 결정
-- **add_context**: tool call 선택/기록 및 샘플링 준비
-- **run_inspect**: 입력 경로 검사(이미지 폴더 여부 확인)
+- **chatbot**: LLM이 요청 분석 및 요구사항 정리
+- **inspect_input_node**: 입력 경로 검사 및 포맷/타입 판별
 - **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성
 - **run_image_manifest**: `list_images_to_csv`를 호출해 이미지 폴더를 CSV 매니페스트로 변환
 - **build_context**: context 확정 및 오류 컨텍스트 설정
@@ -204,8 +199,8 @@ flowchart TD
 ## 어떻게 “전처리”가 수행되나 (동작 설명)
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
-2) **요청 해석/툴 선택**: LLM이 tool call을 결정하고 실행 대상을 선택  
-3) **샘플링/요약**: `sample_table` → (내부 요약). 이미지 폴더면 `list_images_to_csv`, 입력 타입이 불확실하면 `inspect_input`으로 확인  
+2) **입력 검사/고정 분기**: `inspect_input_node`가 경로를 검사하고 입력 타입에 따라 고정 분기  
+3) **샘플링/요약**: 테이블이면 `sample_table` → 요약, 이미지 폴더면 `list_images_to_csv`  
 4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 5) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 6) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
@@ -260,7 +255,7 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - `run_<run_id>_internal_trace_내부기록.md`
 
 포함 내용:
-- 단계별 타임라인 (`chatbot → add_context → run_inspect/run_sample_and_summarize → build_context → generate → code_check → validate → reflect`)
+- 단계별 타임라인 (`chatbot → inspect_input_node → run_sample_and_summarize/run_image_manifest → build_context → generate → code_check → validate → reflect`)
 - 입력 유형에 따라 `run_image_manifest` 경로로 분기될 수 있음
 - 각 iteration에서 생성된 코드(imports + script)
 - 실행 오류(traceback), stdout, validation report

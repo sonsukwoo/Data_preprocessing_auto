@@ -848,7 +848,7 @@ def run_stream(body: RunRequest) -> StreamingResponse:
             yield json.dumps({"type": "stage", "stage": "queued", "detail": "요청 접수"}, ensure_ascii=False) + "\n"
             node_to_stage = {
                 "chatbot": ("analyzing", "요청/데이터 분석 중"),
-                "add_context": ("sampling", "데이터 샘플링 중"),
+                "inspect_input_node": ("sampling", "데이터 샘플링 중"),
                 "generate": ("generating", "스크립트 생성 중"),
                 "code_check": ("executing", "스크립트 실행 중"),
                 "reflect": ("refactoring", "리팩트 중"),
