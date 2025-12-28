@@ -33,17 +33,11 @@ from .common_utils import (
 
 
 # ========================== 노드 함수: 실제 작업을 수행하는 노드 정의 ==================================
-# chatbot: 첫 LLM 호출 + 요구사항 추출 + 툴 호출 유도, 사용자 요청 저장
-def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
-    """첫 번째 LLM 호출 + 요구사항 추출 + user_request 유지."""
-    system = (
-        "You can call tools. Choose the most appropriate tool based on the request:\n"
-        "- If the input is an image folder (explicitly mentioned), call `list_images_to_csv`.\n"
-        "- If the input is a tabular file/folder, call `sample_table`.\n"
-        "- Use `inspect_input` only when the input type is unclear and you need to check the path."
-    )
-    response = llm_with_tools.invoke([("system", system), *state["messages"]])
+# chatbot: 요구사항 추출 + user_request 유지
+def chatbot(state: State, llm_gpt: ChatOpenAI):
+    """요구사항 구조화 + user_request 유지 (툴 선택은 하지 않음)."""
     user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
+    messages = list(state.get("messages", []) or [])
 
     reqs = []
     requirements_prompt = ""
@@ -56,6 +50,9 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
             "- 파일 경로/URL/ID 같은 부수 정보는 요구사항에서 제외하세요.\n"
             "- 각 요구사항은 짧은 동사형 문장으로 작성하세요.\n"
             "- 중복은 제거하고 최대 10개만 포함하세요.\n"
+            "- 숫자/범위/시간/형식 조건은 절대 축약하거나 변경하지 마세요.\n"
+            "- 금지/제외/예외/형식 지정 문장은 반드시 개별 요구사항으로 포함하세요.\n"
+            "- 출력 형식(예: 시간 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.\n"
             "- requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.\n"
             "- 출력은 지정된 스키마에 맞는 JSON만 반환하세요."
         )
@@ -64,11 +61,17 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
         if isinstance(payload, RequirementsPayload):
             reqs = payload.requirements or []
             requirements_prompt = (payload.requirements_prompt or "").strip()
+            if reqs:
+                requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs])
+                if requirements_prompt:
+                    requirements_prompt = f"{requirements_prompt}\n\n요구사항 목록:\n{requirements_list}"
+                else:
+                    requirements_prompt = requirements_list
     except Exception as exc:  # noqa: BLE001
         reqs_error = f"{type(exc).__name__}: {exc}"
 
     return {
-        "messages": [response],
+        "messages": messages,
         "user_request": user_req,
         "requirements": reqs,
         "requirements_prompt": requirements_prompt or None,
@@ -84,86 +87,85 @@ def chatbot(state: State, llm_with_tools: ChatOpenAI, llm_gpt: ChatOpenAI):
                 "requirements": [r.model_dump() for r in reqs],
                 "requirements_prompt": requirements_prompt or None,
                 "requirements_error": reqs_error,
-                "tool_calls": getattr(response, "tool_calls", None),
-                "assistant_message": getattr(response, "content", None),
             },
         ),
     }
 
-# add_context: LLM tool_call 중 실제 실행할 대상을 선택
-def add_context(state: State):
-    """LLM이 반환한 tool_calls 중 첫 번째 유효 호출을 선택해 저장."""
-    if messages := state.get("messages", []):
-        message = messages[-1]
-    else:
-        raise ValueError("No message found in input")
-
-    tool_calls = getattr(message, "tool_calls", []) or []
-    selected: Optional[dict[str, Any]] = None
-    for tc in tool_calls:
-        name = tc.get("name")
-        if name in {"inspect_input", "sample_table", "list_images_to_csv"}:
-            selected = tc
-            break
-
-    if not selected:
-        raise ValueError("No supported tool call found in LLM response.")
-
-    tool_name = str(selected.get("name") or "")
-    tool_args = selected.get("args") or {}
-    user_request = state.get("user_request", "")
-    return {
-        "tool_call_name": tool_name,
-        "tool_call_args": tool_args,
-        "context_candidate": None,
-        "inspect_result": None,
-        "sample_json": None,
-        "summary_context": None,
-        "user_request": user_request,
-        "phase": "sampling",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "add_context",
-                "phase": "sampling",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_request,
-                "tool_calls": tool_calls,
-                "tool_call_selected": {"name": tool_name, "args": tool_args},
-            },
-        ),
-    }
+_PATH_HINT_EXTS = {
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".parquet",
+    ".feather",
+    ".arrow",
+    ".xlsx",
+    ".xls",
+    ".zip",
+}
 
 
-# run_inspect: 입력 경로 검사(파일/폴더/이미지 여부 판단)
-def run_inspect(state: State):
+def _extract_input_path(user_request: str) -> str | None:
+    text = (user_request or "").strip()
+    if not text:
+        return None
+    if text[0] in {"'", '"'}:
+        quote = text[0]
+        end = text.find(quote, 1)
+        if end > 1:
+            candidate = text[1:end].strip()
+            if candidate:
+                return candidate
+    candidate = text.split()[0].strip()
+    if not candidate:
+        return None
+    if candidate.startswith(("s3://", "/", "./", "../", "~")):
+        return candidate
+    if "/" in candidate or "\\" in candidate:
+        return candidate
+    if Path(candidate).suffix.lower() in _PATH_HINT_EXTS:
+        return candidate
+    try:
+        if Path(candidate).expanduser().resolve().exists():
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
+# inspect_input_node: 입력 경로 검사(파일/폴더/이미지 여부 판단)
+def inspect_input_node(state: State):
     """inspect_input을 실행해 입력 상태를 구조화."""
-    args = state.get("tool_call_args") or {}
-    user_request = state.get("user_request", "")
+    user_request = state.get("user_request") or extract_user_request(state.get("messages", []))
+    input_path = _extract_input_path(user_request or "")
     context_candidate: Optional[str] = None
     inspect_info: Optional[dict[str, Any]] = None
-    try:
-        inspect_str = inspect_input.invoke(args)
-        if isinstance(inspect_str, str) and inspect_str.startswith("ERROR_CONTEXT||"):
-            context_candidate = inspect_str
-        else:
-            try:
-                parsed = json.loads(inspect_str)
-            except Exception as exc:  # noqa: BLE001
-                context_candidate = f"ERROR_CONTEXT||InvalidJSON||{exc}"
+
+    if not input_path:
+        context_candidate = (
+            "ERROR_CONTEXT||MissingInputPath||"
+            "업로드된 파일/폴더 경로를 찾지 못했습니다. 파일을 업로드한 뒤 요청 앞에 경로가 포함되었는지 확인하세요."
+        )
+    else:
+        try:
+            inspect_str = inspect_input.invoke({"path": input_path})
+            if isinstance(inspect_str, str) and inspect_str.startswith("ERROR_CONTEXT||"):
+                context_candidate = inspect_str
             else:
-                if isinstance(parsed, dict):
-                    inspect_info = parsed
-                    if not inspect_info.get("has_images"):
-                        context_candidate = (
-                            "ERROR_CONTEXT||NonImageInput||"
-                            "inspect_input은 이미지 폴더 확인용입니다. 테이블은 sample_table을 사용하세요."
-                        )
+                try:
+                    parsed = json.loads(inspect_str)
+                except Exception as exc:  # noqa: BLE001
+                    context_candidate = f"ERROR_CONTEXT||InvalidJSON||{exc}"
                 else:
-                    context_candidate = "ERROR_CONTEXT||InvalidPayload||inspect_input 결과가 dict가 아닙니다."
-    except Exception as exc:  # noqa: BLE001
-        context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+                    if isinstance(parsed, dict):
+                        inspect_info = parsed
+                    else:
+                        context_candidate = "ERROR_CONTEXT||InvalidPayload||inspect_input 결과가 dict가 아닙니다."
+        except Exception as exc:  # noqa: BLE001
+            context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    if inspect_info is None and context_candidate is None:
+        context_candidate = "ERROR_CONTEXT||InvalidPayload||inspect_input 결과가 비어 있습니다."
 
     return {
         "inspect_result": inspect_info,
@@ -173,10 +175,11 @@ def run_inspect(state: State):
             state,
             {
                 "ts": now_iso(),
-                "node": "run_inspect",
+                "node": "inspect_input_node",
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "user_request": user_request,
+                "input_path": input_path,
                 "inspect_result": inspect_info,
                 "context_candidate": context_candidate,
             },
@@ -190,13 +193,12 @@ def run_image_manifest(state: State):
     user_request = state.get("user_request", "")
     context_candidate: Optional[str] = None
     try:
-        tool_name = state.get("tool_call_name")
-        args = state.get("tool_call_args") or {}
-        if tool_name != "list_images_to_csv":
-            inspect_info = state.get("inspect_result") or {}
-            dir_path = inspect_info.get("input_path") or ""
-            args = {"dir_path": dir_path}
-        context_candidate = list_images_to_csv.invoke(args)
+        inspect_info = state.get("inspect_result") or {}
+        dir_path = inspect_info.get("input_path") or ""
+        if not dir_path:
+            context_candidate = "ERROR_CONTEXT||MissingInputPath||이미지 폴더 경로를 찾지 못했습니다."
+        else:
+            context_candidate = list_images_to_csv.invoke({"dir_path": dir_path})
     except Exception as exc:  # noqa: BLE001
         context_candidate = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
 
@@ -221,21 +223,17 @@ def run_image_manifest(state: State):
 def run_sample_and_summarize(state: State):
     """sample_table + summarize_table을 한 노드에서 수행."""
     user_request = state.get("user_request", "")
-    tool_name = state.get("tool_call_name")
-    tool_args = state.get("tool_call_args") or {}
     context_candidate: Optional[str] = None
     sample_json: Optional[str] = None
     summary_context: Optional[str] = None
 
     try:
-        if tool_name == "sample_table":
-            args = tool_args
+        inspect_info = state.get("inspect_result") or {}
+        target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
+        if not target:
+            context_candidate = "ERROR_CONTEXT||MissingInputPath||테이블 경로를 찾지 못했습니다."
         else:
-            inspect_info = state.get("inspect_result") or {}
-            target = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
-            sample_size = tool_args.get("sample_size", 5000)
-            args = {"path": target, "sample_size": sample_size}
-        sample_json = sample_table.invoke(args)
+            sample_json = sample_table.invoke({"path": target, "sample_size": 5000})
         if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
             context_candidate = sample_json
         else:
@@ -724,6 +722,49 @@ def validate(state: State):
                 ),
             }
 
+        if isinstance(metrics, dict):
+            missing_evidence: list[str] = []
+            for r in reqs:
+                v = report_reqs.get(r.id)
+                if isinstance(v, bool):
+                    passed = v
+                elif isinstance(v, dict):
+                    passed = bool(v.get("ok"))
+                else:
+                    passed = False
+                if not passed:
+                    continue
+                prefix = f"{r.id}_"
+                has_evidence = any(str(k).startswith(prefix) for k in metrics.keys())
+                if not has_evidence:
+                    missing_evidence.append(r.id)
+            if missing_evidence:
+                if execution_workdir:
+                    cleanup_dir(execution_workdir)
+                msg = (
+                    "Validation failed: missing evidence metrics for passed requirements.\n"
+                    "Each passed requirement must include at least one metrics key prefixed by its id.\n"
+                    f"Missing evidence for: {missing_evidence}\n"
+                    f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=4000)}"
+                )
+                return {
+                    "messages": [("user", msg)],
+                    "error": "yes",
+                    "phase": "validating",
+                    **append_trace(
+                        state,
+                        {
+                            "ts": now_iso(),
+                            "node": "validate",
+                            "phase": "validating",
+                            "iterations": int(state.get("iterations", 0) or 0),
+                            "error": "yes",
+                            "validation_report": report,
+                            "last_message": msg,
+                        },
+                    ),
+                }
+
     # metrics에 "<col>_missing"/"<col>_empty"가 있으면, 대응하는 placeholder/fallback 메트릭도 요구한다.
     # "정보 없음" 같은 placeholder로 미매핑 값을 숨기는 것을 방지한다.
     if isinstance(metrics, dict):
@@ -923,26 +964,15 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
 # ===================================== 노드 함수 끝 =============================
 
 # ======================================= 라우터: 조건 분기 함수 영역 ======================
-# route_tool_call: 선택된 tool_call에 따라 실행 노드 분기
-def route_tool_call(state: State):
-    tool_name = state.get("tool_call_name") or ""
-    if tool_name == "inspect_input":
-        return "run_inspect"
-    if tool_name == "sample_table":
-        return "run_sample_and_summarize"
-    if tool_name == "list_images_to_csv":
-        return "run_image_manifest"
-    return END
-
-# route_after_inspect: 검사 결과에 따라 이미지/샘플/에러 분기
-def route_after_inspect(state: State):
+# route_after_inspect_input: 검사 결과에 따라 이미지/샘플/에러 분기
+def route_after_inspect_input(state: State):
     ctx = state.get("context_candidate", "")
     if isinstance(ctx, str) and ctx.startswith("ERROR_CONTEXT||"):
         return "build_context"
     info = state.get("inspect_result") or {}
     if isinstance(info, dict) and info.get("has_images"):
         return "run_image_manifest"
-    return "build_context"
+    return "run_sample_and_summarize"
 
 # route_after_context: 최종 컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기
 def route_after_context(state: State):
@@ -951,18 +981,6 @@ def route_after_context(state: State):
     if isinstance(ctx, str) and ctx.startswith("ERROR_CONTEXT||"):
         return "friendly_error"
     return "generate"
-
-# guardrail_route: chatbot 단계에서 툴 호출 여부로 분기하는 간단한 라우터
-def guardrail_route(state: State):
-    if isinstance(state, list):
-        ai_message = state[-1]
-    elif messages := state.get("messages", []):
-        ai_message = messages[-1]
-    else:
-        raise ValueError(f"No messages found in input state to tool_edge: {state}")
-    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
-        return "add_context"
-    return END
 
 def decide_to_finish(state: State, max_iterations: int):
     """실패 시 reflect/최종에러 분기 결정."""
@@ -991,19 +1009,14 @@ def build_graph(
     """LangGraph를 구성하고 컴파일된 그래프를 반환."""
     llm_gpt = ChatOpenAI(model=llm_model)
     llm_coder = ChatOpenAI(model=coder_model, temperature=0)
-    llm_with_tools = llm_gpt.bind_tools(
-        tools=[inspect_input, sample_table, list_images_to_csv]
-    )
 
     graph_builder = StateGraph(State)
 
     # ===== 노드: 그래프에 노드 추가 =====
     # 요청 해석 + tool call 결정
-    graph_builder.add_node("chatbot", partial(chatbot, llm_with_tools=llm_with_tools, llm_gpt=llm_gpt))
-    # tool call 선택/기록
-    graph_builder.add_node("add_context", add_context)
+    graph_builder.add_node("chatbot", partial(chatbot, llm_gpt=llm_gpt))
     # 입력 검사 + 샘플링/요약 단계 구성
-    graph_builder.add_node("run_inspect", run_inspect)
+    graph_builder.add_node("inspect_input_node", inspect_input_node)
     graph_builder.add_node("run_image_manifest", run_image_manifest)
     graph_builder.add_node("run_sample_and_summarize", run_sample_and_summarize)
     graph_builder.add_node("build_context", build_context)
@@ -1020,31 +1033,16 @@ def build_graph(
     # ===== 엣지: 노드 연결 정의 =====
     graph_builder.add_edge(START, "chatbot")
 
-    # chatbot 이후: 툴 호출이 있으면 add_context, 없으면 END
-    graph_builder.add_conditional_edges(
-        "chatbot",
-        guardrail_route,
-        {"add_context": "add_context", END: END},
-    )
+    # chatbot 이후: 입력 검사 노드로 이동
+    graph_builder.add_edge("chatbot", "inspect_input_node")
 
-    # add_context 이후: tool_call 종류에 따라 분기
+    # inspect_input 이후: 이미지/샘플/에러 분기
     graph_builder.add_conditional_edges(
-        "add_context",
-        route_tool_call,
+        "inspect_input_node",
+        route_after_inspect_input,
         {
-            "run_inspect": "run_inspect",
+            "run_image_manifest": "run_image_manifest",
             "run_sample_and_summarize": "run_sample_and_summarize",
-            "run_image_manifest": "run_image_manifest",
-            END: END,
-        },
-    )
-
-    # inspect 이후: 이미지/샘플/에러 분기
-    graph_builder.add_conditional_edges(
-        "run_inspect",
-        route_after_inspect,
-        {
-            "run_image_manifest": "run_image_manifest",
             "build_context": "build_context",
         },
     )
