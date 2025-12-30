@@ -722,49 +722,6 @@ def validate(state: State):
                 ),
             }
 
-        if isinstance(metrics, dict):
-            missing_evidence: list[str] = []
-            for r in reqs:
-                v = report_reqs.get(r.id)
-                if isinstance(v, bool):
-                    passed = v
-                elif isinstance(v, dict):
-                    passed = bool(v.get("ok"))
-                else:
-                    passed = False
-                if not passed:
-                    continue
-                prefix = f"{r.id}_"
-                has_evidence = any(str(k).startswith(prefix) for k in metrics.keys())
-                if not has_evidence:
-                    missing_evidence.append(r.id)
-            if missing_evidence:
-                if execution_workdir:
-                    cleanup_dir(execution_workdir)
-                msg = (
-                    "Validation failed: missing evidence metrics for passed requirements.\n"
-                    "Each passed requirement must include at least one metrics key prefixed by its id.\n"
-                    f"Missing evidence for: {missing_evidence}\n"
-                    f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=4000)}"
-                )
-                return {
-                    "messages": [("user", msg)],
-                    "error": "yes",
-                    "phase": "validating",
-                    **append_trace(
-                        state,
-                        {
-                            "ts": now_iso(),
-                            "node": "validate",
-                            "phase": "validating",
-                            "iterations": int(state.get("iterations", 0) or 0),
-                            "error": "yes",
-                            "validation_report": report,
-                            "last_message": msg,
-                        },
-                    ),
-                }
-
     # metrics에 "<col>_missing"/"<col>_empty"가 있으면, 대응하는 placeholder/fallback 메트릭도 요구한다.
     # "정보 없음" 같은 placeholder로 미매핑 값을 숨기는 것을 방지한다.
     if isinstance(metrics, dict):
@@ -793,6 +750,42 @@ def validate(state: State):
                 "For each filled/added column, include '<col>_placeholder' (or '<col>_fallback') and set ok=False when it > 0.\n"
                 f"Columns requiring placeholder metrics: {missing_placeholder_metrics}\n"
                 f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=3000)}"
+            )
+            return {
+                "messages": [("user", msg)],
+                "error": "yes",
+                "phase": "validating",
+                **append_trace(
+                    state,
+                    {
+                        "ts": now_iso(),
+                        "node": "validate",
+                        "phase": "validating",
+                        "iterations": int(state.get("iterations", 0) or 0),
+                        "error": "yes",
+                        "validation_report": report,
+                        "last_message": msg,
+                    },
+                ),
+            }
+
+        # 매핑 누락 감지: *_missing_mapping(_count) 지표가 있으면 반드시 실패 처리
+        missing_mapping: list[str] = []
+        missing_mapping_count: int | None = None
+        for k, v in metrics.items():
+            key = str(k).lower()
+            if key.endswith("_missing_mapping_count") and isinstance(v, (int, float)) and v > 0:
+                missing_mapping_count = int(v)
+            if "missing_mapping" in key and isinstance(v, (list, tuple)) and v:
+                missing_mapping.extend([str(x) for x in v[:50]])
+        if missing_mapping_count is not None or missing_mapping:
+            if execution_workdir:
+                cleanup_dir(execution_workdir)
+            msg = (
+                "Validation failed: mapping coverage is incomplete.\n"
+                f"missing_mapping_count: {missing_mapping_count}\n"
+                f"missing_mapping: {missing_mapping}\n"
+                f"__validation_report__ (truncated):\n{safe_format_json_like(report, limit=4000)}"
             )
             return {
                 "messages": [("user", msg)],

@@ -1,6 +1,6 @@
-langchain-core>=0.3.0
-langchain-openai>=0.2.0
-langgraph>=0.2.35
+langchain-core==1.2.4
+langchain-openai==1.1.6
+langgraph==1.0.5
 pandas>=2.2.2
 pyarrow>=17.0.0
 python-dotenv>=1.0.1

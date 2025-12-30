@@ -28,6 +28,9 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
   - <column>_placeholder (또는 <column>_fallback): 기본값으로 채운 개수
   placeholder로 누락을 숨기지 마세요. placeholder/fallback 개수가 0보다 크면 ok=False로 설정하고,
   누락된 키(예: missing_<column>)를 metrics에 포함해 보정 루프가 확장 가능하도록 하세요.
+  매핑/딕셔너리/lookup으로 컬럼 값을 채우는 경우에는 source 컬럼의 고유값 전체를 수집해 매핑 키와 비교하세요.
+  누락이 있으면 즉시 실패하고, 누락 목록/개수를 metrics에 <column>_missing_mapping_count 및 <column>_missing_mapping(또는 missing_<column>)로 기록하세요.
+  누락 값을 임의값/대표값으로 채우지 마세요.
 """,
         ),
         (
@@ -72,9 +75,6 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
   - 최소 {{ok: bool, details: str}}를 포함하는 dict
 - 어떤 요구사항이라도 미충족이면 __validation_report__['ok'] = False로 설정하고, 실패한 ID를 issues에 포함하세요.
 - 위에 제공된 모든 요구사항 ID를 반드시 포함하세요. 임의의 ID를 만들지 마세요.
-- 각 요구사항 ID마다 최소 1개 이상의 숫자 지표를 계산해 __validation_report__['metrics']에 '{{REQ_ID}}_' 접두사로 저장하세요.
-  (예: 'REQ-1_missing', 'REQ-2_coverage'). 증거 지표가 없으면 해당 요구사항을 True로 표시하지 마세요.
-- 요구사항 결과를 기본값(True)로 두지 말고, 계산된 지표로부터 도출하세요.
 """,
         ),
     ]
