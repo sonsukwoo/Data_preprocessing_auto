@@ -13,36 +13,23 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 from langchain_core.tools import tool
+from .constants import (
+    _CATEGORICAL_EXAMPLE_ROWS,
+    _CATEGORICAL_TOP_COLS,
+    _EXT_PRIORITY,
+    _HF_METADATA_FILENAMES,
+    _IMAGE_EXTS,
+    _MAX_FEATHER_MB,
+    _MAX_JSON_FULL_LOAD_MB,
+    _MISSING_TOP_N,
+    _PREVIEW_MAX_COLS,
+    _PREVIEW_ROWS,
+    _SUPPORTED_EXTS,
+    _VALUE_REPR_LIMIT,
+)
 
 
-# =========================
-# 상수 / 설정
-# =========================
 
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-_SUPPORTED_EXTS = {".csv", ".tsv", ".json", ".parquet", ".feather", ".arrow", ".xlsx", ".xls"}
-_HF_METADATA_FILENAMES = {"dataset_info.json", "state.json"}
-
-_EXT_PRIORITY = {
-    ".parquet": 0,
-    ".arrow": 1,
-    ".feather": 2,
-    ".csv": 3,
-    ".tsv": 4,
-    ".xlsx": 5,
-    ".xls": 6,
-    ".json": 7,
-}
-
-_PREVIEW_ROWS = 5
-_PREVIEW_MAX_COLS = 20
-_MISSING_TOP_N = 20
-_CATEGORICAL_TOP_COLS = 20
-_CATEGORICAL_EXAMPLE_ROWS = 3
-_VALUE_REPR_LIMIT = 200
-
-_MAX_FEATHER_MB = 512
-_MAX_JSON_FULL_LOAD_MB = 256
 
 # 전수 스캔 기본값
 _SCAN_DEFAULT_CHUNKSIZE = 100_000

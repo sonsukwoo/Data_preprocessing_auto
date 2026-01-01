@@ -98,7 +98,12 @@ flowchart LR
   N -->|"API proxy"| A["FastAPI backend 8000"]
   A --> G["LangGraph Agent"]
   G -->|"inspect + fixed routing"| T["inspect_input_node"]
-  T -->|"route"| S["sample_table / image_manifest"]
+  T -->|"table"| S["run_sample_and_summarize<br/>(node)"]
+  T -->|"images"| IM["run_image_manifest<br/>(node)"]
+  S --> C["build_context"]
+  IM --> C
+  G -->|"LLM toolcalls"| TP["run_planned_tools"]
+  TP --> TOOL["scan tools<br/>collect_unique_values / mapping_coverage_report / collect_rare_values / detect_parseability / detect_encoding / column_profile"]
   G -->|"generate code"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
@@ -121,7 +126,8 @@ flowchart TD
   C --> D{error_context?<br/>오류 컨텍스트?}
   D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
   D -->|아니오| B[chatbot<br/>요구사항 정리 + 툴 선택]
-  B --> T[run_planned_tools<br/>전수 조사]
+  B --> T[run_planned_tools<br/>전수 조사(툴콜)]
+  T --> TS[툴 목록<br/>collect_unique_values / mapping_coverage_report / collect_rare_values / detect_parseability / detect_encoding / column_profile]
   T --> E[generate<br/>코드 생성]
   E --> F[code_check<br/>실행]
   F --> FE{실행 오류?}
@@ -146,8 +152,8 @@ flowchart TD
   subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
     I0 --> D1{입력 타입}
-  D1 -->|이미지 폴더| IMG[run_image_manifest<br/>이미지 매니페스트]
-  D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize<br/>샘플링+요약]
+  D1 -->|이미지 폴더| IMG[run_image_manifest<br/>이미지 매니페스트 (노드)]
+  D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize<br/>샘플링+요약 (노드)]
     D1 -->|오류| B[build_context<br/>컨텍스트 확정<br/>]
 
     SAS --> B
@@ -158,6 +164,7 @@ flowchart TD
   D4 -->|예| FE[friendly_error<br/>에러를 한글로 요약]
   D4 -->|아니오| C[chatbot<br/>요구사항 정리 + 툴 선택]
   C --> TP[run_planned_tools<br/>선택된 툴 실행/전수 조사]
+  TP --> TOOLS[툴 콜 목록<br/>collect_unique_values / mapping_coverage_report / collect_rare_values / detect_parseability / detect_encoding / column_profile]
   TP --> G[generate<br/>전처리 스크립트 생성]
 
   G --> E[code_check<br/>코드 실행]
@@ -181,10 +188,11 @@ flowchart TD
 ### 노드별 역할 요약
 - **chatbot**: LLM이 요청 분석, 요구사항 정리, 필요한 툴 선택
 - **inspect_input_node**: 입력 경로 검사 및 포맷/타입 판별
-- **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성(워크플로우 내부 유틸)
-- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(워크플로우 내부 유틸)
+- **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성(고정 노드)
+- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(고정 노드)
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
+  - 툴 목록: `collect_unique_values`, `mapping_coverage_report`, `collect_rare_values`, `detect_parseability`, `detect_encoding`, `column_profile`
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성(중간/최종 오류 공통)
 - **generate**: 전처리 파이썬 스크립트 생성
 - **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
