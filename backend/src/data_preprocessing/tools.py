@@ -551,138 +551,6 @@ def _summarize_dataframe(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
 
 
 # =========================
-# 분기: 입력 검사(경로/파일 유형 판단)
-# =========================
-
-# 툴: 입력 검사
-@tool
-def inspect_input(path: str, max_files: int = 50) -> str:
-    """입력 경로를 검사해 이미지 폴더/테이블 후보를 판별."""
-
-    p = _resolve_path(path)
-    if not p.exists():
-        return f"ERROR_CONTEXT||FileNotFoundError||{path} 경로가 존재하지 않습니다."
-
-    if p.is_dir():
-        has_image = any(f.suffix.lower() in _IMAGE_EXTS for f in p.rglob("*") if f.is_file())
-        candidates: list[str] = []
-        for f in p.rglob("*"):
-            if not f.is_file():
-                continue
-            if f.name in _HF_METADATA_FILENAMES:
-                continue
-            ext = f.suffix.lower()
-            if ext not in _SUPPORTED_EXTS:
-                continue
-            candidates.append(str(f.resolve()))
-            if len(candidates) >= max_files:
-                break
-
-        candidate = _pick_candidate_from_dir(p)
-        if not has_image and candidate is None:
-            return f"ERROR_CONTEXT||NoSupportedFiles||{p} 아래에서 지원하는 데이터 파일을 찾지 못했습니다."
-
-        payload = {
-            "input_path": str(p),
-            "is_dir": True,
-            "has_images": bool(has_image),
-            "candidate_file": str(candidate) if candidate else "",
-            "supported_files": candidates,
-            "supported_count": len(candidates),
-        }
-        return json.dumps(payload, ensure_ascii=False)
-
-    payload = {
-        "input_path": str(p),
-        "is_dir": False,
-        "has_images": False,
-        "candidate_file": str(p),
-        "supported_files": [str(p)],
-        "supported_count": 1,
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-# =========================
-# 분기: 테이블 데이터(샘플/요약)
-# =========================
-
-# 툴: 테이블 샘플링
-@tool
-def sample_table(path: str, sample_size: int = 5000) -> str:
-    """표 형식 파일(또는 디렉터리)을 샘플링해 JSON으로 반환."""
-
-    p = _resolve_path(path)
-
-    if p.is_dir():
-        has_image = any(f.suffix.lower() in _IMAGE_EXTS for f in p.rglob("*") if f.is_file())
-        if has_image:
-            return f"ERROR_CONTEXT||ImageFolder||{p} 아래에 이미지가 있어 테이블 샘플링을 생략합니다."
-        candidate = _pick_candidate_from_dir(p)
-        if candidate is None:
-            return f"ERROR_CONTEXT||NoSupportedFiles||{p} 아래에서 지원하는 데이터 파일을 찾지 못했습니다."
-        p = candidate
-
-    try:
-        df, fmt = _read_table_like(str(p), sample_size=sample_size)
-    except Exception as exc:  # noqa: BLE001
-        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
-
-    try:
-        sample_records = json.loads(df.to_json(orient="records", date_format="iso"))
-    except Exception as exc:  # noqa: BLE001
-        return f"ERROR_CONTEXT||SampleSerializeError||{exc}"
-
-    payload = {
-        "data_path": str(p),
-        "detected_format": fmt,
-        "sample_rows": len(df),
-        "sample": sample_records,
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-# 툴: 샘플 요약
-@tool
-def summarize_table(sample_json: str) -> str:
-    """sample_table JSON을 요약 Markdown으로 변환."""
-
-    try:
-        payload = json.loads(sample_json)
-    except Exception as exc:  # noqa: BLE001
-        return f"ERROR_CONTEXT||InvalidJSON||{exc}"
-
-    if not isinstance(payload, dict):
-        return "ERROR_CONTEXT||InvalidPayload||sample_json은 dict 형태여야 합니다."
-
-    sample = payload.get("sample")
-    if not isinstance(sample, list):
-        return "ERROR_CONTEXT||InvalidPayload||sample_json['sample']이 list가 아닙니다."
-
-    df = pd.DataFrame(sample)
-    head_md, dtypes_md, missing_md, numeric_md, categorical_md = _summarize_dataframe(df)
-    data_path = payload.get("data_path", "")
-    fmt = payload.get("detected_format", "")
-    sample_rows = payload.get("sample_rows", len(df))
-
-    return (
-        f"data_path: {data_path}\n"
-        f"detected_format: {fmt}\n"
-        f"sample_rows: {sample_rows}\n"
-        "head:\n"
-        f"{head_md}\n\n"
-        "dtypes:\n"
-        f"{dtypes_md}\n\n"
-        f"missing (top {_MISSING_TOP_N}):\n"
-        f"{missing_md}\n\n"
-        "numeric describe:\n"
-        f"{numeric_md}\n\n"
-        f"categorical/examples (top {_CATEGORICAL_TOP_COLS} cols):\n"
-        f"{categorical_md}\n"
-    )
-
-
-# =========================
 # 분기:  LLM 툴콜
 # =========================
 
@@ -691,8 +559,8 @@ def summarize_table(sample_json: str) -> str:
 def collect_unique_values(
     path: str,
     column: str,
-    max_unique: int = 5000,
-    max_values_return: int = _SCAN_MAX_RETURN,
+    max_unique: int | None = 5000,
+    max_values_return: int | None = _SCAN_MAX_RETURN,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -769,8 +637,8 @@ def mapping_coverage_report(
     path: str,
     column: str,
     mapping_keys: Sequence[str] | None = None,
-    max_unique: int = 5000,
-    max_values_return: int = _SCAN_MAX_RETURN,
+    max_unique: int | None = 5000,
+    max_values_return: int | None = _SCAN_MAX_RETURN,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -861,7 +729,7 @@ def collect_rare_values(
     path: str,
     column: str,
     rare_threshold: int = 3,
-    max_values_return: int = _SCAN_MAX_RETURN,
+    max_values_return: int | None = _SCAN_MAX_RETURN,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -934,7 +802,7 @@ def detect_parseability(
     path: str,
     column: str,
     parsers: Sequence[str] | None = None,
-    max_samples: int = 2000,
+    max_samples: int | None = 2000,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -982,12 +850,15 @@ def detect_parseability(
 
         found = True
         series = chunk[col_norm].dropna().astype(str)
-        remaining = max_samples - len(samples)
-        if remaining <= 0:
-            break
-        samples.extend(series.head(remaining).tolist())
-        if len(samples) >= max_samples:
-            break
+        if max_samples is None:
+            samples.extend(series.tolist())
+        else:
+            remaining = max_samples - len(samples)
+            if remaining <= 0:
+                break
+            samples.extend(series.head(remaining).tolist())
+            if len(samples) >= max_samples:
+                break
 
     if not found:
         return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
@@ -1062,11 +933,11 @@ def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
 def column_profile(
     path: str,
     columns: Sequence[str] | None = None,
-    max_columns: int = 50,
+    max_columns: int | None = 50,
     max_rows: int | None = None,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
-    sample_values_limit: int = 5,
+    sample_values_limit: int | None = 5,
 ) -> str:
     """컬럼별 타입/결측률/샘플값을 전수 스캔으로 요약."""
 
@@ -1106,7 +977,7 @@ def column_profile(
                     return f"ERROR_CONTEXT||MissingColumn||{missing} 컬럼을 찾지 못했습니다."
                 target_cols = list(normalized_columns)
             else:
-                target_cols = list(chunk.columns[:max_columns])
+                target_cols = list(chunk.columns) if max_columns is None else list(chunk.columns[:max_columns])
 
         for col in target_cols:
             if col not in chunk.columns:
@@ -1123,11 +994,11 @@ def column_profile(
             )
             info["total"] += len(s)
             info["missing"] += int(s.isna().sum())
-            if len(info["samples"]) < sample_values_limit:
+            if sample_values_limit is None or len(info["samples"]) < sample_values_limit:
                 values = s.dropna().unique()
                 for v in values:
                     info["samples"].add(_safe_repr(v))
-                    if len(info["samples"]) >= sample_values_limit:
+                    if sample_values_limit is not None and len(info["samples"]) >= sample_values_limit:
                         break
 
     if not profiles:
@@ -1162,52 +1033,9 @@ def column_profile(
 
 
 # =========================
-# 분기: 이미지 폴더 처리
-# =========================
-
-# 툴: 이미지 목록 CSV 생성
-@tool
-def list_images_to_csv(
-    dir_path: str,
-    output_csv: str | None = None,
-    extensions: Sequence[str] | None = None,
-    sample_size: int = 20,
-) -> str:
-    """디렉터리의 이미지 파일을 찾아 CSV 매니페스트로 저장하고 요약을 반환."""
-
-    root = _resolve_path(dir_path)
-    if not root.is_dir():
-        raise ValueError(f"Directory not found: {dir_path}")
-
-    allowed_exts = _normalize_image_exts(extensions)
-    df = _build_image_manifest(root, allowed_exts)
-
-    if output_csv is None:
-        output_csv_path = root / "image_index.csv"
-    else:
-        output_csv_path = pathlib.Path(output_csv).expanduser().resolve()
-    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_csv_path, index=False)
-
-    preview_md = df.head(sample_size).to_markdown()
-    return (
-        f"dir_path: {root}\n"
-        f"found_files: {len(df)}\n"
-        f"output_csv: {output_csv_path}\n"
-        "columns: filepath, filename, label\n"
-        "preview:\n"
-        f"{preview_md}\n"
-    )
-
-
-# =========================
 # 내보내기 목록
 # =========================
 __all__ = [
-    # 입력/샘플링
-    "inspect_input",
-    "sample_table",
-    "summarize_table",
     # 전수 스캔(고유값/매핑/희귀)
     "collect_unique_values",
     "mapping_coverage_report",
@@ -1216,6 +1044,4 @@ __all__ = [
     "detect_parseability",
     "detect_encoding",
     "column_profile",
-    # 이미지
-    "list_images_to_csv",
 ]

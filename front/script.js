@@ -46,11 +46,8 @@ function renderToolCalls(toolCalls) {
   calls.forEach((tool) => {
     const li = document.createElement("li");
     const name = tool?.name || "tool";
-    const reason = tool?.reason ? ` - ${tool.reason}` : "";
-    const args = tool?.args && Object.keys(tool.args).length
-      ? ` args=${JSON.stringify(tool.args)}`
-      : "";
-    li.textContent = `${name}${reason}${args}`;
+    const reasonText = typeof tool?.reason === "string" ? tool.reason.trim() : "";
+    li.textContent = reasonText ? `${name} - ${reasonText}` : name;
     toolCallsEl.appendChild(li);
   });
 }

@@ -1,6 +1,6 @@
 # 데이터 전처리 에이전트 (LangGraph + FastAPI) — 데모
 
-자연어로 “이 데이터 전처리해줘”를 입력하면, **LangGraph 기반 에이전트가 데이터(파일/폴더/S3)를 샘플링·요약한 뒤 요구사항을 정리하고, 필요 시 전수 조사 도구를 호출한 다음 전처리 파이썬 스크립트를 생성/실행해 결과 파일을 생성**하는 데모 프로젝트입니다.
+자연어로 “이 데이터 전처리해줘”를 입력하면, **LangGraph 기반 에이전트가 데이터(파일/폴더/S3)를 고정 로직으로 검사·샘플링·요약한 뒤 요구사항을 정리하고, 필요 시 전수 조사 도구(LLM 툴콜)를 호출한 다음 전처리 파이썬 스크립트를 생성/실행해 결과 파일을 생성**하는 데모 프로젝트입니다.
 
 이 프로젝트는 과거 파인튜닝 프로젝트를 진행할 때,
 **전처리 스크립트 작성 → 패키지 설치 → 오류 수정 → 재실행**을 반복하거나
@@ -97,8 +97,8 @@ flowchart LR
   U["User Browser"] -->|"HTTP 8080"| N["Nginx front"]
   N -->|"API proxy"| A["FastAPI backend 8000"]
   A --> G["LangGraph Agent"]
-  G -->|"inspect + fixed routing"| T["inspect_input"]
-  T -->|"route"| S["sample_table / list_images_to_csv"]
+  G -->|"inspect + fixed routing"| T["inspect_input_node"]
+  T -->|"route"| S["sample_table / image_manifest"]
   G -->|"generate code"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
@@ -146,8 +146,8 @@ flowchart TD
   subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
     I0 --> D1{입력 타입}
-    D1 -->|이미지 폴더| IMG[run_image_manifest<br/>이미지 매니페스트]
-    D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize<br/>샘플링+요약]
+  D1 -->|이미지 폴더| IMG[run_image_manifest<br/>이미지 매니페스트]
+  D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize<br/>샘플링+요약]
     D1 -->|오류| B[build_context<br/>컨텍스트 확정<br/>]
 
     SAS --> B
@@ -170,11 +170,10 @@ flowchart TD
   D6 -->|실패| D
 
   D -->|남음| RF[reflect<br/>오류 기반 수정]
-  D -->|초과| FFE[final_friendly_error<br/>최종 실패 요약]
+  D -->|초과| FE[friendly_error<br/>최종 실패 요약]
 
   RF --> E
   FE --> END
-  FFE --> END
 ```
 
 
@@ -182,16 +181,15 @@ flowchart TD
 ### 노드별 역할 요약
 - **chatbot**: LLM이 요청 분석, 요구사항 정리, 필요한 툴 선택
 - **inspect_input_node**: 입력 경로 검사 및 포맷/타입 판별
-- **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성
-- **run_image_manifest**: `list_images_to_csv`를 호출해 이미지 폴더를 CSV 매니페스트로 변환
+- **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성(워크플로우 내부 유틸)
+- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(워크플로우 내부 유틸)
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
-- **friendly_error**: 사용자에게 보여줄 오류 메시지 생성
+- **friendly_error**: 사용자에게 보여줄 오류 메시지 생성(중간/최종 오류 공통)
 - **generate**: 전처리 파이썬 스크립트 생성
 - **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
 - **validate**: validation_report 검증(요구사항/가드레일)
 - **reflect**: 오류 원인 기반 코드 재생성
-- **final_friendly_error**: 반복 실패 시 최종 요약 메시지 생성
 
 </details>
 
@@ -203,9 +201,10 @@ flowchart TD
 
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
 2) **입력 검사/고정 분기**: `inspect_input_node`가 경로를 검사하고 입력 타입에 따라 고정 분기  
-3) **샘플링/요약**: 테이블이면 `sample_table` → 요약, 이미지 폴더면 `list_images_to_csv`  
-4) **요구사항 정리 + 툴 선택**: LLM이 샘플링 컨텍스트를 보고 요구사항을 정리하고 필요한 툴을 선택  
+3) **샘플링/요약**: 테이블이면 `sample_table` → 요약, 이미지 폴더면 이미지 매니페스트 생성(고정 로직)  
+4) **요구사항 정리 + 툴 선택**: LLM이 샘플링 컨텍스트를 보고 요구사항을 정리하고 필요한 전수 조사 툴을 선택  
 5) **전수 조사**: `run_planned_tools`가 선택된 툴을 실행하고 결과를 context에 추가  
+   - 현재는 **시간 제한(기본 60초)만 적용**하고, 행 수 제한은 두지 않습니다.  
 6) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
 7) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
 8) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  

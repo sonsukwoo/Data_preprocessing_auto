@@ -81,6 +81,20 @@ body {
   min-width: 0;
 }
 
+#tool-calls {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+#tool-calls li {
+  margin: 6px 0;
+  line-height: 1.35;
+  white-space: normal;
+}
+
 .input-panel {
   display: flex;
   flex-direction: column;
