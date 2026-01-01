@@ -24,11 +24,36 @@ const stageDetailEl = $("stage-detail");
 const stepperEl = $("stepper");
 const downloadsEl = $("downloads");
 const downloadsNoteEl = $("downloads-note");
+// TEMP: tool calls debug panel (remove later)
+const toolCallsEl = $("tool-calls");
+const toolCallsNoteEl = $("tool-calls-note");
 
 let selectedFiles = [];
 let currentStage = "queued";
 let hasRefactored = false;
 let refactorEvents = [];
+
+function renderToolCalls(toolCalls) {
+  if (toolCallsEl) toolCallsEl.innerHTML = "";
+  if (toolCallsNoteEl) toolCallsNoteEl.textContent = "";
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  if (!toolCallsEl) return;
+  if (calls.length === 0) {
+    if (toolCallsNoteEl) toolCallsNoteEl.textContent = "선택된 툴 없음";
+    return;
+  }
+  if (toolCallsNoteEl) toolCallsNoteEl.textContent = `총 ${calls.length}개`;
+  calls.forEach((tool) => {
+    const li = document.createElement("li");
+    const name = tool?.name || "tool";
+    const reason = tool?.reason ? ` - ${tool.reason}` : "";
+    const args = tool?.args && Object.keys(tool.args).length
+      ? ` args=${JSON.stringify(tool.args)}`
+      : "";
+    li.textContent = `${name}${reason}${args}`;
+    toolCallsEl.appendChild(li);
+  });
+}
 
 async function checkHealth() {
   try {
@@ -97,15 +122,31 @@ function setRefactorCount(n) {
   setStage(currentStage, stageDetailEl?.textContent || "");
 }
 
-const MAIN_STAGES = ["queued", "analyzing", "sampling", "generating", "executing", "finalizing", "done"];
+const MAIN_STAGES = [
+  "queued",
+  "inspecting",
+  "sampling",
+  "context",
+  "analyzing",
+  "tooling",
+  "generating",
+  "executing",
+  "validating",
+  "finalizing",
+  "done",
+];
 const BRANCH_STAGE = "refactoring";
 
 const STAGE_LABELS = {
   queued: "대기 중",
-  analyzing: "요청/데이터 분석 중",
+  inspecting: "입력 검사 중",
   sampling: "데이터 샘플링 중",
+  context: "컨텍스트 구성 중",
+  analyzing: "요구사항 정리 중",
+  tooling: "툴 조사/전수 스캔 중",
   generating: "스크립트 생성 중",
   executing: "스크립트 실행 중",
+  validating: "요구사항 검증 중",
   refactoring: "리팩트 중",
   finalizing: "결과 정리 중",
   done: "완료",
@@ -127,7 +168,8 @@ function setStage(stage, detail = "") {
   const mainIndexByStage = new Map(MAIN_STAGES.map((s, i) => [s, i]));
   const mainIndex = mainIndexByStage.has(stage)
     ? mainIndexByStage.get(stage)
-    : // if branching refactor (or unknown), treat main flow as "executing" boundary
+    : // if branching refactor (or unknown), keep last main stage or fall back to validating/executing
+      mainIndexByStage.get(mainIndexByStage.has(prevStage) ? prevStage : "validating") ??
       mainIndexByStage.get("executing");
 
   const steps = Array.from(stepperEl.querySelectorAll(".step"));
@@ -148,10 +190,24 @@ function setStage(stage, detail = "") {
         if (stage === "done" && s === "done") el.classList.add("active");
         if (stage === "done") el.classList.add("done");
       }
+    } else if (s === BRANCH_STAGE) {
+      if (stage === BRANCH_STAGE) {
+        el.classList.add("active");
+      } else if (hasRefactored) {
+        el.classList.add("done");
+      }
     }
   });
 
-  // arrows removed from UI
+  const branchArrows = Array.from(stepperEl.querySelectorAll(".branch-arrow"));
+  branchArrows.forEach((arrow) => {
+    arrow.classList.remove("active", "done");
+    if (stage === BRANCH_STAGE) {
+      arrow.classList.add("active");
+    } else if (hasRefactored) {
+      arrow.classList.add("done");
+    }
+  });
 
   if (stageTextEl) stageTextEl.textContent = STAGE_LABELS[stage] || stage;
   if (stageDetailEl) stageDetailEl.textContent = detail || "";
@@ -179,6 +235,8 @@ function renderResult(data) {
   const imports = data.imports || "";
   const code = data.code || "";
   if (scriptEl) scriptEl.textContent = [imports.trim(), code.trim()].filter(Boolean).join("\n\n");
+
+  renderToolCalls(data.tool_calls);
 
   if (downloadsEl) downloadsEl.innerHTML = "";
   if (downloadsNoteEl) downloadsNoteEl.textContent = "";
@@ -289,6 +347,8 @@ async function runWithStream(payload) {
         setRefactorCount(msg.iterations);
       } else if (msg.type === "stage") {
         setStage(msg.stage, msg.detail || "");
+      } else if (msg.type === "tool_calls") {
+        renderToolCalls(msg.tool_calls);
       } else if (msg.type === "final") {
         finalData = msg.data;
         setStage("done", "");
@@ -304,6 +364,7 @@ async function runWithStream(payload) {
     if (msg.type === "final") finalData = msg.data;
     if (msg.type === "progress") setRefactorCount(msg.iterations);
     if (msg.type === "stage") setStage(msg.stage, msg.detail || "");
+    if (msg.type === "tool_calls") renderToolCalls(msg.tool_calls);
     if (msg.type === "error") throw new Error(msg.detail || "Unknown error");
   }
 
@@ -377,6 +438,7 @@ form.addEventListener("submit", async (e) => {
     refactorEvents = [];
     if (refactorEventsEl) refactorEventsEl.innerHTML = "";
     if (refactorDetailsEl) refactorDetailsEl.open = false;
+    renderToolCalls([]);
     setStage("queued", "요청 준비 중");
     let finalQuestion = question;
 

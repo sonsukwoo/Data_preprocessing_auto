@@ -1,27 +1,50 @@
 from __future__ import annotations
 
+# =========================
+# 표준 라이브러리
+# =========================
 import json
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
+# =========================
+# 외부 라이브러리
+# =========================
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+# =========================
+# 내부 모듈: 모델/프롬포트
+# =========================
 from .models import CodeBlocks, RequirementsPayload, State
-from .prompts import code_gen_prompt, reflect_prompt
+from .prompts import (
+    REQUIREMENTS_SYSTEM_PROMPT,
+    REQUIREMENTS_USER_TEMPLATE,
+    code_gen_prompt,
+    reflect_prompt,
+)
+
+# =========================
+# 내부 모듈: 툴
+# =========================
 from .tools import (
     collect_rare_values,
     collect_unique_values,
     column_profile,
-    detect_datetime_formats,
+    detect_parseability,
     detect_encoding,
+    mapping_coverage_report,
     inspect_input,
     list_images_to_csv,
     sample_table,
     summarize_table,
 )
+
+# =========================
+# 내부 모듈: 공용 유틸
+# =========================
 from .common_utils import (
     append_trace,
     cleanup_dir,
@@ -41,85 +64,9 @@ from .common_utils import (
 )
 
 
-# ========================== 노드 함수: 실제 작업을 수행하는 노드 정의 ==================================
-# chatbot: 요구사항 추출 + 툴 선택
-def chatbot(state: State, llm_gpt: ChatOpenAI):
-    """요구사항 구조화 + 툴 선택."""
-    user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
-    context = state.get("context") or ""
-    messages = list(state.get("messages", []) or [])
-
-    reqs = []
-    requirements_prompt = ""
-    planned_tools = []
-    reqs_error = None
-    try:
-        requirements_system = (
-            "사용자 요청에서 요구사항을 구조화해 추출하세요.\n"
-            "- 요구사항은 사용자의 언어를 유지하세요.\n"
-            "- 새로운 요구사항을 추가하지 마세요.\n"
-            "- 파일 경로/URL/ID 같은 부수 정보는 요구사항에서 제외하세요.\n"
-            "- 각 요구사항은 짧은 동사형 문장으로 작성하세요.\n"
-            "- 중복은 제거하고 최대 10개만 포함하세요.\n"
-            "- 숫자/범위/시간/형식 조건은 절대 축약하거나 변경하지 마세요.\n"
-            "- 금지/제외/예외/형식 지정 문장은 반드시 개별 요구사항으로 포함하세요.\n"
-            "- 출력 형식(예: 시간 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.\n"
-            "- requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.\n"
-            "- tool_calls에는 데이터 조사에 필요한 툴을 선택해서 넣으세요. 필요 없으면 빈 리스트로 두세요.\n"
-            "- 사용 가능한 툴: collect_unique_values, collect_rare_values, detect_datetime_formats, detect_encoding, column_profile\n"
-            "- 매핑/치환/딕셔너리 요구가 있으면 collect_unique_values/collect_rare_values를 우선 고려하세요.\n"
-            "- 날짜/시간 포맷 요구가 있으면 detect_datetime_formats를 고려하세요.\n"
-            "- 인코딩/한글 깨짐 이슈가 있으면 detect_encoding을 고려하세요.\n"
-            "- 결측/타입/분포 확인이 필요하면 column_profile을 고려하세요.\n"
-            "- tool_calls의 args에는 column(필요 시), max_rows/time_limit_sec 같은 제한 옵션을 포함할 수 있습니다.\n"
-            "- 출력은 지정된 스키마에 맞는 JSON만 반환하세요."
-        )
-        structurer = llm_gpt.with_structured_output(RequirementsPayload)
-        payload = structurer.invoke(
-            [
-                ("system", requirements_system),
-                (
-                    "user",
-                    f"요청:\n{user_req}\n\n컨텍스트(샘플/요약):\n{context}",
-                ),
-            ]
-        )
-        if isinstance(payload, RequirementsPayload):
-            reqs = payload.requirements or []
-            requirements_prompt = (payload.requirements_prompt or "").strip()
-            planned_tools = payload.tool_calls or []
-            if reqs:
-                requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs])
-                if requirements_prompt:
-                    requirements_prompt = f"{requirements_prompt}\n\n요구사항 목록:\n{requirements_list}"
-                else:
-                    requirements_prompt = requirements_list
-    except Exception as exc:  # noqa: BLE001
-        reqs_error = f"{type(exc).__name__}: {exc}"
-
-    return {
-        "messages": messages,
-        "user_request": user_req,
-        "requirements": reqs,
-        "requirements_prompt": requirements_prompt or None,
-        "planned_tools": planned_tools or None,
-        "phase": "analyzing",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "chatbot",
-                "phase": "analyzing",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_req,
-                "requirements": [r.model_dump() for r in reqs],
-                "requirements_prompt": requirements_prompt or None,
-                "planned_tools": [t.model_dump() for t in (planned_tools or [])],
-                "tool_calls": [t.model_dump() for t in (planned_tools or [])],
-                "requirements_error": reqs_error,
-            },
-        ),
-    }
+# =========================
+# 노드 함수: 실제 작업 수행
+# =========================
 
 # inspect_input_node: 입력 경로 검사(파일/폴더/이미지 여부 판단)
 def inspect_input_node(state: State):
@@ -274,6 +221,66 @@ def build_context(state: State):
     }
 
 
+# chatbot: 요구사항 추출 + 툴 선택
+def chatbot(state: State, llm_gpt: ChatOpenAI):
+    """요구사항 구조화 + 툴 선택."""
+    user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
+    context = state.get("context") or ""
+    messages = list(state.get("messages", []) or [])
+
+    reqs = []
+    requirements_prompt = ""
+    planned_tools = []
+    reqs_error = None
+    try:
+        structurer = llm_gpt.with_structured_output(RequirementsPayload)
+        payload = structurer.invoke(
+            [
+                ("system", REQUIREMENTS_SYSTEM_PROMPT),
+                (
+                    "user",
+                    REQUIREMENTS_USER_TEMPLATE.format(user_request=user_req, context=context),
+                ),
+            ]
+        )
+        if isinstance(payload, RequirementsPayload):
+            reqs = payload.requirements or []
+            requirements_prompt = (payload.requirements_prompt or "").strip()
+            planned_tools = payload.tool_calls or []
+            if reqs:
+                requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs])
+                if requirements_prompt:
+                    requirements_prompt = f"{requirements_prompt}\n\n요구사항 목록:\n{requirements_list}"
+                else:
+                    requirements_prompt = requirements_list
+    except Exception as exc:  # noqa: BLE001
+        reqs_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "messages": messages,
+        "user_request": user_req,
+        "requirements": reqs,
+        "requirements_prompt": requirements_prompt or None,
+        "planned_tools": planned_tools or None,
+        "phase": "analyzing",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "chatbot",
+                "phase": "analyzing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_req,
+                "requirements": [r.model_dump() for r in reqs],
+                "requirements_prompt": requirements_prompt or None,
+                "planned_tools": [t.model_dump() for t in (planned_tools or [])],
+                "tool_calls": [t.model_dump() for t in (planned_tools or [])],
+                "requirements_error": reqs_error,
+            },
+        ),
+    }
+
+
 # run_planned_tools: LLM이 선택한 툴을 실행해 컨텍스트 보강
 def run_planned_tools(state: State):
     """요구사항에서 선택한 툴을 실행해 컨텍스트를 확장."""
@@ -284,8 +291,9 @@ def run_planned_tools(state: State):
 
     tool_map = {
         "collect_unique_values": collect_unique_values,
+        "mapping_coverage_report": mapping_coverage_report,
         "collect_rare_values": collect_rare_values,
-        "detect_datetime_formats": detect_datetime_formats,
+        "detect_parseability": detect_parseability,
         "detect_encoding": detect_encoding,
         "column_profile": column_profile,
     }
@@ -300,7 +308,7 @@ def run_planned_tools(state: State):
             if raw_args is None:
                 args = {}
             elif hasattr(raw_args, "model_dump"):
-                args = raw_args.model_dump()
+                args = raw_args.model_dump(exclude_none=True)
             else:
                 args = dict(raw_args) if isinstance(raw_args, dict) else {}
             reason = getattr(tool_call, "reason", "") or ""
@@ -315,6 +323,18 @@ def run_planned_tools(state: State):
             continue
         if "path" not in args and default_path:
             args["path"] = default_path
+        elif default_path and isinstance(args.get("path"), str):
+            raw_path = args.get("path", "").strip()
+            if raw_path in {"data_path", "<data_path>", "path", "<path>"}:
+                args["path"] = default_path
+        if "max_rows" in args:
+            args["max_rows"] = None
+        if "time_limit_sec" in args:
+            try:
+                if args["time_limit_sec"] is not None and int(args["time_limit_sec"]) < 60:
+                    args["time_limit_sec"] = 60
+            except Exception:
+                pass
 
         key = json.dumps({"name": name, "args": args}, ensure_ascii=False, sort_keys=True, default=str)
         if key in seen:
@@ -363,78 +383,6 @@ def run_planned_tools(state: State):
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "tool_reports": tool_reports,
-            },
-        ),
-    }
-
-# friendly_error: 로딩 실패 등 오류 컨텍스트를 비개발자용 한글 메시지로 변환
-def friendly_error(state: State, llm_gpt: ChatOpenAI):
-    """원문 에러 메시지를 비개발자용 한글 요약으로 변환."""
-    context = state.get("context", "")
-    user_request = state.get("user_request", "")
-
-    parts = context.split("||", 2)  # ERROR_CONTEXT||<exc_name>||<exc_message>
-    exc_name = parts[1] if len(parts) > 1 else "UnknownError"
-    exc_msg = parts[2] if len(parts) > 2 else context
-
-    prompt = (
-        "다음 에러를 비개발자가 이해할 수 있게 한글로 짧게 설명하고, 해결 방법을 한 줄로 제안하세요.\n"
-        f"요청: {user_request}\n"
-        f"에러명: {exc_name}\n"
-        f"에러내용: {exc_msg}\n"
-        "출력 형식: 원인: ...\n대처: ..."
-    )
-
-    resp = llm_gpt.invoke(prompt)
-    return {
-        "final_user_messages": [("assistant", resp.content)],
-        "error": "yes",
-        "phase": "finalizing",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "friendly_error",
-                "phase": "finalizing",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_request,
-                "context": context,
-                "assistant_message": resp.content,
-            },
-        ),
-    }
-
-
-def final_friendly_error(state: State, llm_gpt: ChatOpenAI):
-    """최종 실패 시점의 에러를 비개발자용 한글 요약으로 변환."""
-
-    user_request = state.get("user_request", "")
-    raw_error = extract_last_message_text(state.get("messages", []))
-    # 프롬프트가 너무 커지는 것을 방지(스택 트레이스는 매우 길 수 있음)
-    raw_error = raw_error[-4000:] if isinstance(raw_error, str) else str(raw_error)
-
-    prompt = (
-        "다음 전처리 실행이 최종적으로 실패했습니다. 비개발자가 이해할 수 있게 한글로 짧게 설명하고, "
-        "사용자가 바로 시도할 수 있는 해결 방법을 1~3개 제안하세요.\n"
-        f"요청: {user_request}\n"
-        f"에러내용(일부):\n{raw_error}\n"
-        "출력 형식:\n원인: ...\n대처: ...\n"
-    )
-    resp = llm_gpt.invoke(prompt)
-    return {
-        "final_user_messages": [("assistant", resp.content)],
-        "error": "yes",
-        "phase": "finalizing",
-        **append_trace(
-            state,
-            {
-                "ts": now_iso(),
-                "node": "final_friendly_error",
-                "phase": "finalizing",
-                "iterations": int(state.get("iterations", 0) or 0),
-                "user_request": user_request,
-                "raw_error": raw_error,
-                "assistant_message": resp.content,
             },
         ),
     }
@@ -1127,9 +1075,86 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     }
 
 
-# ===================================== 노드 함수 끝 =============================
+# friendly_error: 로딩 실패 등 오류 컨텍스트를 비개발자용 한글 메시지로 변환
+def friendly_error(state: State, llm_gpt: ChatOpenAI):
+    """원문 에러 메시지를 비개발자용 한글 요약으로 변환."""
+    context = state.get("context", "")
+    user_request = state.get("user_request", "")
 
-# ======================================= 라우터: 조건 분기 함수 영역 ======================
+    parts = context.split("||", 2)  # ERROR_CONTEXT||<exc_name>||<exc_message>
+    exc_name = parts[1] if len(parts) > 1 else "UnknownError"
+    exc_msg = parts[2] if len(parts) > 2 else context
+
+    prompt = (
+        "다음 에러를 비개발자가 이해할 수 있게 한글로 짧게 설명하고, 해결 방법을 한 줄로 제안하세요.\n"
+        f"요청: {user_request}\n"
+        f"에러명: {exc_name}\n"
+        f"에러내용: {exc_msg}\n"
+        "출력 형식: 원인: ...\n대처: ..."
+    )
+
+    resp = llm_gpt.invoke(prompt)
+    return {
+        "final_user_messages": [("assistant", resp.content)],
+        "error": "yes",
+        "phase": "finalizing",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "friendly_error",
+                "phase": "finalizing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "context": context,
+                "assistant_message": resp.content,
+            },
+        ),
+    }
+
+
+def final_friendly_error(state: State, llm_gpt: ChatOpenAI):
+    """최종 실패 시점의 에러를 비개발자용 한글 요약으로 변환."""
+
+    user_request = state.get("user_request", "")
+    raw_error = extract_last_message_text(state.get("messages", []))
+    # 프롬프트가 너무 커지는 것을 방지(스택 트레이스는 매우 길 수 있음)
+    raw_error = raw_error[-4000:] if isinstance(raw_error, str) else str(raw_error)
+
+    prompt = (
+        "다음 전처리 실행이 최종적으로 실패했습니다. 비개발자가 이해할 수 있게 한글로 짧게 설명하고, "
+        "사용자가 바로 시도할 수 있는 해결 방법을 1~3개 제안하세요.\n"
+        f"요청: {user_request}\n"
+        f"에러내용(일부):\n{raw_error}\n"
+        "출력 형식:\n원인: ...\n대처: ...\n"
+    )
+    resp = llm_gpt.invoke(prompt)
+    return {
+        "final_user_messages": [("assistant", resp.content)],
+        "error": "yes",
+        "phase": "finalizing",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "final_friendly_error",
+                "phase": "finalizing",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "user_request": user_request,
+                "raw_error": raw_error,
+                "assistant_message": resp.content,
+            },
+        ),
+    }
+
+
+# =========================
+# 노드 함수 끝
+# =========================
+
+# =========================
+# 라우터: 조건 분기 함수
+# =========================
 # route_after_inspect_input: 검사 결과에 따라 이미지/샘플/에러 분기
 def route_after_inspect_input(state: State):
     ctx = state.get("context_candidate", "")
@@ -1141,6 +1166,7 @@ def route_after_inspect_input(state: State):
     return "run_sample_and_summarize"
 
 # route_after_context: 최종 컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기
+# route_after_context: 컨텍스트 오류 여부에 따른 분기
 def route_after_context(state: State):
     """컨텍스트에 오류 마커가 있으면 친절한 에러 노드로 분기."""
     ctx = state.get("context", "")
@@ -1148,6 +1174,7 @@ def route_after_context(state: State):
         return "friendly_error"
     return "chatbot"
 
+# decide_to_finish: 실패 시 reflect/최종에러 분기 결정
 def decide_to_finish(state: State, max_iterations: int):
     """실패 시 reflect/최종에러 분기 결정."""
     error = state["error"]
@@ -1159,14 +1186,19 @@ def decide_to_finish(state: State, max_iterations: int):
     return "reflect"
 
 
+# route_after_execution: code_check 이후 분기
 def route_after_execution(state: State, max_iterations: int):
     """code_check 이후: 실행 성공이면 validate로, 실패면 reflect/최종에러로."""
     if state.get("error") == "no":
         return "validate"
     return decide_to_finish(state, max_iterations=max_iterations)
-# ============================================== 라우터 끝 ==============================
+# =========================
+# 라우터 끝
+# =========================
 
-# ================================ 그래프 빌드: 노드/엣지 추가 블록 ===========================
+# =========================
+# 그래프 빌드: 노드/엣지 추가
+# =========================
 def build_graph(
     llm_model: str = "gpt-4o-mini",
     coder_model: str = "gpt-4.1",
@@ -1195,7 +1227,6 @@ def build_graph(
     graph_builder.add_node("validate", validate)
     graph_builder.add_node("reflect", partial(reflect, llm_coder=llm_coder, llm_gpt=llm_gpt))
     # ===== 노드 끝 =====
-
 
     # ===== 엣지: 노드 연결 정의 =====
     graph_builder.add_edge(START, "inspect_input_node")
@@ -1255,9 +1286,13 @@ def build_graph(
     # ===== 엣지 끝 =====
 
     return graph_builder.compile()
-# ===================================== 그래프 빌드 끝 =================================
+# =========================
+# 그래프 빌드 끝
+# =========================
 
-# ====================== 엔트리포인트: 그래프 실행 함수 =======================================
+# =========================
+# 엔트리포인트: 그래프 실행 함수
+# =========================
 def run_request(
     request: str,
     max_iterations: int = 3,
@@ -1302,7 +1337,9 @@ def run_request(
                 files.append(trace_name)
             result["output_files"] = files
     return result
-# ===== 엔트리포인트 끝 =====
+# =========================
+# 엔트리포인트 끝
+# =========================
 
 
 __all__ = ["build_graph", "run_request"]

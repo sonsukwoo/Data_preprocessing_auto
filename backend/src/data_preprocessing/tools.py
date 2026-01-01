@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import pathlib
 import time
@@ -15,7 +16,7 @@ from langchain_core.tools import tool
 
 
 # =========================
-# Constants / Config
+# 상수 / 설정
 # =========================
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -41,15 +42,16 @@ _CATEGORICAL_EXAMPLE_ROWS = 3
 _VALUE_REPR_LIMIT = 200
 
 _MAX_FEATHER_MB = 512
+_MAX_JSON_FULL_LOAD_MB = 256
 
-# Full scan defaults
+# 전수 스캔 기본값
 _SCAN_DEFAULT_CHUNKSIZE = 100_000
-_SCAN_TIME_LIMIT_SEC = 20
+_SCAN_TIME_LIMIT_SEC = 60
 _SCAN_MAX_RETURN = 200
 
 
 # =========================
-# Path utils
+# 경로 유틸
 # =========================
 
 def _strip_query(path: str) -> str:
@@ -60,8 +62,50 @@ def _resolve_path(path: str) -> pathlib.Path:
     return pathlib.Path(_strip_query(path)).expanduser().resolve()
 
 
+def _load_json_payload(path: pathlib.Path) -> Any:
+    """JSON 파일을 UTF-8 BOM 대응으로 안전하게 로드."""
+    size_mb = path.stat().st_size / (1024 * 1024)
+    if size_mb > _MAX_JSON_FULL_LOAD_MB:
+        raise ValueError(f"JSON file too large for full load ({size_mb:.1f} MB)")
+    with path.open("r", encoding="utf-8-sig") as f:
+        text = f.read().strip()
+    if not text:
+        raise ValueError("Empty JSON content")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = text[:200].replace("\n", "\\n")
+        raise ValueError(f"Invalid JSON content: {exc}. preview={preview!r}") from exc
+
+
+def _detect_text_format(path: pathlib.Path) -> str:
+    """텍스트 파일의 실제 포맷을 감지 (json/csv/tsv)."""
+
+    with path.open("rb") as f:
+        raw = f.read(4096)
+    if not raw or not raw.strip():
+        raise ValueError("Empty file content")
+
+    try:
+        sample = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        sample = raw.decode("latin-1", errors="ignore")
+
+    stripped = sample.lstrip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        return "json"
+
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",", "\t"])
+        return "tsv" if dialect.delimiter == "\t" else "csv"
+    except Exception:
+        if "\t" in sample and sample.count("\t") >= sample.count(","):
+            return "tsv"
+        return "csv"
+
+
 # =========================
-# Arrow / Parquet loaders
+# Arrow / Parquet 로더
 # =========================
 
 def _read_arrow_ipc_sample(path: pathlib.Path, sample_size: int) -> tuple[pd.DataFrame, str]:
@@ -112,7 +156,7 @@ def _read_parquet_sample(path: pathlib.Path, sample_size: int) -> pd.DataFrame:
 
 
 # =========================
-# Generic table loader
+# 일반 테이블 로더
 # =========================
 
 def _read_table_like(path: str, sample_size: int) -> tuple[pd.DataFrame, str]:
@@ -138,34 +182,39 @@ def _read_table_like(path: str, sample_size: int) -> tuple[pd.DataFrame, str]:
         return pd.read_feather(p).head(sample_size), "feather"
 
     if ext in {".xlsx", ".xls"}:
-        return pd.read_excel(p, nrows=sample_size), ext.lstrip(".")
-
-    if ext == ".json":
         try:
-            return pd.read_json(p, nrows=sample_size, lines=True), "json-lines"
+            return pd.read_excel(p, nrows=sample_size), ext.lstrip(".")
         except Exception:
-            try:
-                return pd.read_json(p, nrows=sample_size, lines=False), "json-array"
-            except Exception:
-                with p.open("r", encoding="utf-8", errors="replace") as f:
-                    raw = json.load(f)
-                if isinstance(raw, list):
-                    return pd.json_normalize(raw)[:sample_size], "json-array-normalized"
-                return pd.json_normalize([raw])[:sample_size], "json-normalized"
+            detected = _detect_text_format(p)
+            sep = "\t" if detected == "tsv" else ","
+            return pd.read_csv(p, sep=sep, nrows=sample_size, on_bad_lines="skip"), detected
 
-    if ext in {".csv", ".tsv"}:
-        sep = "\t" if ext == ".tsv" else ","
+    if ext in {".json", ".csv", ".tsv"}:
+        detected = _detect_text_format(p)
+        if detected == "json":
+            try:
+                return pd.read_json(p, nrows=sample_size, lines=True, encoding="utf-8-sig"), "json-lines"
+            except Exception:
+                try:
+                    return pd.read_json(p, nrows=sample_size, lines=False, encoding="utf-8-sig"), "json-array"
+                except Exception:
+                    raw = _load_json_payload(p)
+                    if isinstance(raw, list):
+                        return pd.json_normalize(raw)[:sample_size], "json-array-normalized"
+                    return pd.json_normalize([raw])[:sample_size], "json-normalized"
+
+        sep = "\t" if detected == "tsv" else ","
         try:
-            return pd.read_csv(p, sep=sep, nrows=sample_size, on_bad_lines="skip"), ext.lstrip(".")
+            return pd.read_csv(p, sep=sep, nrows=sample_size, on_bad_lines="skip"), detected
         except Exception:
             return pd.read_csv(p, sep=None, engine="python", nrows=sample_size, on_bad_lines="skip"), "csv-auto"
 
-    # Fallback CSV heuristics (keep behavior permissive)
+    # CSV 추정 폴백(관대한 파싱 유지)
     return pd.read_csv(p, sep=None, engine="python", nrows=sample_size, on_bad_lines="skip"), "csv-fallback"
 
 
 # =========================
-# Directory helpers
+# 디렉터리 헬퍼
 # =========================
 
 def _pick_candidate_from_dir(root: pathlib.Path) -> pathlib.Path | None:
@@ -183,7 +232,7 @@ def _pick_candidate_from_dir(root: pathlib.Path) -> pathlib.Path | None:
     candidates.sort(
         key=lambda f: (
             _EXT_PRIORITY.get(f.suffix.lower(), 999),
-            0 if "data" in f.parts else 1,  # HF-style data shards when present
+            0 if "data" in f.parts else 1,  # HF 스타일 데이터 샤드 우선
             len(f.parts),
         )
     )
@@ -195,7 +244,7 @@ def _build_image_manifest(root: pathlib.Path, allowed_exts: set[str]) -> pd.Data
     for path in root.rglob("*"):
         if path.is_dir():
             continue
-        # macOS zip metadata: ignore __MACOSX/ and AppleDouble files (._*)
+        # macOS zip 메타데이터: __MACOSX/ 와 AppleDouble(._*) 제외
         if "__MACOSX" in path.parts:
             continue
         if path.name.startswith("._"):
@@ -222,7 +271,7 @@ def _normalize_image_exts(extensions: Sequence[str] | None) -> set[str]:
 
 
 # =========================
-# Full scan helpers
+# 전수 스캔 헬퍼
 # =========================
 
 def _resolve_scan_target(path: str) -> pathlib.Path:
@@ -250,10 +299,66 @@ def _get_table_iterator(
 ) -> tuple[Iterable[pd.DataFrame], str]:
     ext = path.suffix.lower()
 
-    if ext in {".csv", ".tsv"}:
-        sep = "\t" if ext == ".tsv" else ","
-        reader = pd.read_csv(path, sep=sep, usecols=usecols, chunksize=chunksize, on_bad_lines="skip")
-        return reader, ext.lstrip(".")
+    if ext in {".json", ".csv", ".tsv"}:
+        detected = _detect_text_format(path)
+        if detected == "json":
+            try:
+                reader = pd.read_json(path, lines=True, chunksize=chunksize, encoding="utf-8-sig")
+                iterator = iter(reader)
+                first = next(iterator)
+                if usecols:
+                    first = first[list(usecols)]
+
+                def _iter_lines() -> Iterable[pd.DataFrame]:
+                    yield first
+                    for chunk in iterator:
+                        if usecols:
+                            chunk = chunk[list(usecols)]
+                        yield chunk
+
+                return _iter_lines(), "json-lines"
+            except Exception:
+                try:
+                    df = pd.read_json(path, lines=False, encoding="utf-8-sig")
+                    if usecols:
+                        df = df[list(usecols)]
+                    return (df,), "json-array"
+                except Exception:
+                    raw = _load_json_payload(path)
+                    if isinstance(raw, list):
+                        def _iter_json_list() -> Iterable[pd.DataFrame]:
+                            for i in range(0, len(raw), chunksize):
+                                df = pd.json_normalize(raw[i:i + chunksize])
+                                if usecols:
+                                    df = df[list(usecols)]
+                                yield df
+
+                        return _iter_json_list(), "json-array-normalized"
+                    df = pd.json_normalize(raw if isinstance(raw, list) else [raw])
+                    if usecols:
+                        df = df[list(usecols)]
+                    return (df,), "json-normalized"
+
+        sep = "\t" if detected == "tsv" else ","
+        try:
+            reader = pd.read_csv(
+                path,
+                sep=sep,
+                usecols=usecols,
+                chunksize=chunksize,
+                on_bad_lines="skip",
+            )
+            return reader, detected
+        except Exception:
+            reader = pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+                usecols=usecols,
+                chunksize=chunksize,
+                on_bad_lines="skip",
+            )
+            return reader, "csv-fallback"
 
     if ext == ".parquet":
         pf = pq.ParquetFile(path)
@@ -295,26 +400,80 @@ def _get_table_iterator(
         df = pd.read_feather(path, columns=list(usecols) if usecols else None)
         return (df,), "feather"
 
-    if ext in {".xlsx", ".xls"}:
-        df = pd.read_excel(path, usecols=usecols)
-        return (df,), ext.lstrip(".")
-
-    if ext == ".json":
+    if ext == ".xlsx":
         try:
-            reader = pd.read_json(path, lines=True, chunksize=chunksize)
-            return reader, "json-lines"
-        except Exception:
-            df = pd.read_json(path, lines=False)
-            if usecols:
-                df = df[list(usecols)]
-            return (df,), "json"
+            def _iter_xlsx() -> Iterable[pd.DataFrame]:
+                import openpyxl
 
-    # Fallback CSV
+                wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+                try:
+                    ws = wb.active
+                    rows = ws.iter_rows(values_only=True)
+                    header = next(rows, None)
+                    if header is None:
+                        yield pd.DataFrame()
+                        return
+                    columns = ["" if c is None else str(c).strip() for c in header]
+                    if usecols:
+                        wanted = {_normalize_column_name(c) for c in usecols}
+                        indices = [i for i, c in enumerate(columns) if _normalize_column_name(c) in wanted]
+                        out_cols = [columns[i] for i in indices]
+                    else:
+                        indices = None
+                        out_cols = columns
+                    chunk_rows: list[list[object]] = []
+                    for row in rows:
+                        if indices is not None:
+                            chunk_rows.append([row[i] if i < len(row) else None for i in indices])
+                        else:
+                            chunk_rows.append(list(row))
+                        if len(chunk_rows) >= chunksize:
+                            yield pd.DataFrame(chunk_rows, columns=out_cols)
+                            chunk_rows = []
+                    if chunk_rows:
+                        yield pd.DataFrame(chunk_rows, columns=out_cols)
+                finally:
+                    wb.close()
+
+            return _iter_xlsx(), "xlsx"
+        except Exception:
+            try:
+                df = pd.read_excel(path, usecols=usecols)
+                return (df,), "xlsx"
+            except Exception:
+                detected = _detect_text_format(path)
+                sep = "\t" if detected == "tsv" else ","
+                reader = pd.read_csv(
+                    path,
+                    sep=sep,
+                    usecols=usecols,
+                    chunksize=chunksize,
+                    on_bad_lines="skip",
+                )
+                return reader, detected
+
+    if ext == ".xls":
+        try:
+            df = pd.read_excel(path, usecols=usecols)
+            return (df,), "xls"
+        except Exception:
+            detected = _detect_text_format(path)
+            sep = "\t" if detected == "tsv" else ","
+            reader = pd.read_csv(
+                path,
+                sep=sep,
+                usecols=usecols,
+                chunksize=chunksize,
+                on_bad_lines="skip",
+            )
+            return reader, detected
+
+    # CSV 폴백
     reader = pd.read_csv(path, sep=None, engine="python", usecols=usecols, chunksize=chunksize, on_bad_lines="skip")
     return reader, "csv-fallback"
 
 # =========================
-# Summarization
+# 요약
 # =========================
 
 def _safe_repr(value: object, limit: int = _VALUE_REPR_LIMIT) -> str:
@@ -368,7 +527,7 @@ def _summarize_dataframe(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
         except Exception:
             nunique = -1
         try:
-            # Prefer representative examples over head(): show top-frequency values, plus a couple rare ones.
+            # head() 대신 대표 예시: 최빈값 위주 + 일부 희귀값
             vc = s.dropna().map(_safe_repr).value_counts()
             top = vc.head(_CATEGORICAL_EXAMPLE_ROWS)
             tail_n = max(0, _CATEGORICAL_EXAMPLE_ROWS - len(top))
@@ -392,9 +551,10 @@ def _summarize_dataframe(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
 
 
 # =========================
-# Tools
+# 분기: 입력 검사(경로/파일 유형 판단)
 # =========================
 
+# 툴: 입력 검사
 @tool
 def inspect_input(path: str, max_files: int = 50) -> str:
     """입력 경로를 검사해 이미지 폴더/테이블 후보를 판별."""
@@ -443,6 +603,11 @@ def inspect_input(path: str, max_files: int = 50) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+# =========================
+# 분기: 테이블 데이터(샘플/요약)
+# =========================
+
+# 툴: 테이블 샘플링
 @tool
 def sample_table(path: str, sample_size: int = 5000) -> str:
     """표 형식 파일(또는 디렉터리)을 샘플링해 JSON으로 반환."""
@@ -477,6 +642,7 @@ def sample_table(path: str, sample_size: int = 5000) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+# 툴: 샘플 요약
 @tool
 def summarize_table(sample_json: str) -> str:
     """sample_table JSON을 요약 Markdown으로 변환."""
@@ -517,9 +683,10 @@ def summarize_table(sample_json: str) -> str:
 
 
 # =========================
-# Full scan tools
+# 분기:  LLM 툴콜
 # =========================
 
+# 툴: 고유값 수집
 @tool
 def collect_unique_values(
     path: str,
@@ -596,6 +763,99 @@ def collect_unique_values(
     return json.dumps(payload, ensure_ascii=False)
 
 
+# 툴: 매핑 커버리지 점검
+@tool
+def mapping_coverage_report(
+    path: str,
+    column: str,
+    mapping_keys: Sequence[str] | None = None,
+    max_unique: int = 5000,
+    max_values_return: int = _SCAN_MAX_RETURN,
+    time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
+    max_rows: int | None = None,
+    chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
+) -> str:
+    """매핑 딕셔너리 키와 데이터 고유값을 비교해 누락을 점검."""
+
+    if not mapping_keys:
+        return "ERROR_CONTEXT||InvalidArgs||mapping_keys가 비어 있습니다."
+
+    try:
+        target = _resolve_scan_target(path)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    start = time.time()
+    unique_values: set[str] = set()
+    rows_scanned = 0
+    truncated = False
+    time_limited = False
+    row_limited = False
+
+    try:
+        iterable, fmt = _get_table_iterator(target, usecols=None, chunksize=chunksize)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    col_norm = _normalize_column_name(column)
+    found = False
+
+    for chunk in iterable:
+        if time_limit_sec and (time.time() - start) > time_limit_sec:
+            time_limited = True
+            break
+        rows_scanned += len(chunk)
+        if max_rows and rows_scanned > max_rows:
+            row_limited = True
+            break
+        _sanitize_columns(chunk)
+        if col_norm not in chunk.columns:
+            if not found:
+                return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
+            continue
+        found = True
+        series = chunk[col_norm].dropna()
+        if not series.empty:
+            values = series.unique()
+            unique_values.update(_safe_repr(v) for v in values)
+        if max_unique and len(unique_values) >= max_unique:
+            truncated = True
+            break
+
+    if not found:
+        return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
+
+    mapping_set = {_safe_repr(k) for k in mapping_keys}
+    missing_in_mapping = sorted(unique_values - mapping_set)
+    extra_mapping_keys = sorted(mapping_set - unique_values)
+
+    missing_preview = missing_in_mapping
+    extra_preview = extra_mapping_keys
+    if max_values_return and len(missing_preview) > max_values_return:
+        missing_preview = missing_preview[:max_values_return]
+    if max_values_return and len(extra_preview) > max_values_return:
+        extra_preview = extra_preview[:max_values_return]
+
+    payload = {
+        "data_path": str(target),
+        "detected_format": fmt,
+        "column": column,
+        "normalized_column": col_norm,
+        "rows_scanned": rows_scanned,
+        "unique_count": len(unique_values),
+        "mapping_key_count": len(mapping_set),
+        "missing_in_mapping_count": len(missing_in_mapping),
+        "missing_in_mapping_preview": missing_preview,
+        "extra_mapping_keys_count": len(extra_mapping_keys),
+        "extra_mapping_keys_preview": extra_preview,
+        "truncated": bool(truncated),
+        "time_limited": bool(time_limited),
+        "row_limited": bool(row_limited),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+# 툴: 희귀값 수집
 @tool
 def collect_rare_values(
     path: str,
@@ -668,21 +928,30 @@ def collect_rare_values(
     return json.dumps(payload, ensure_ascii=False)
 
 
+# 툴: 파싱 가능성 점검
 @tool
-def detect_datetime_formats(
+def detect_parseability(
     path: str,
-    column: str | None = None,
+    column: str,
+    parsers: Sequence[str] | None = None,
     max_samples: int = 2000,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
 ) -> str:
-    """날짜/시간 컬럼의 파싱 가능 여부를 점검."""
+    """특정 컬럼이 datetime/숫자/불리언 등으로 파싱 가능한지 점검."""
 
     try:
         target = _resolve_scan_target(path)
     except Exception as exc:  # noqa: BLE001
         return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    if not column:
+        return "ERROR_CONTEXT||InvalidArgs||column 인자가 필요합니다."
+
+    chosen = [p.lower() for p in (parsers or ["datetime", "numeric", "bool"]) if isinstance(p, str)]
+    if not chosen:
+        return "ERROR_CONTEXT||InvalidArgs||parsers 인자가 비어 있습니다."
 
     start = time.time()
     samples: list[str] = []
@@ -695,7 +964,7 @@ def detect_datetime_formats(
     except Exception as exc:  # noqa: BLE001
         return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
 
-    col_norm = _normalize_column_name(column) if column else None
+    col_norm = _normalize_column_name(column)
     found = False
 
     for chunk in iterable:
@@ -708,17 +977,11 @@ def detect_datetime_formats(
             break
         _sanitize_columns(chunk)
 
-        target_col = col_norm
-        if target_col is None:
-            for c in chunk.columns:
-                if "date" in c.lower() or "time" in c.lower():
-                    target_col = c
-                    break
-        if target_col is None or target_col not in chunk.columns:
-            continue
+        if col_norm not in chunk.columns:
+            return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
 
         found = True
-        series = chunk[target_col].dropna().astype(str)
+        series = chunk[col_norm].dropna().astype(str)
         remaining = max_samples - len(samples)
         if remaining <= 0:
             break
@@ -727,18 +990,31 @@ def detect_datetime_formats(
             break
 
     if not found:
-        return "ERROR_CONTEXT||MissingColumn||날짜/시간 컬럼을 찾지 못했습니다."
+        return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
 
-    parsed = pd.to_datetime(pd.Series(samples), errors="coerce")
-    success_rate = float(parsed.notna().mean()) if samples else 0.0
+    s = pd.Series(samples)
+    results: dict[str, float] = {}
+
+    if "datetime" in chosen:
+        parsed = pd.to_datetime(s, errors="coerce")
+        results["datetime"] = round(float(parsed.notna().mean()) if len(s) else 0.0, 4)
+
+    if "numeric" in chosen:
+        parsed = pd.to_numeric(s, errors="coerce")
+        results["numeric"] = round(float(parsed.notna().mean()) if len(s) else 0.0, 4)
+
+    if "bool" in chosen:
+        lowered = s.str.strip().str.lower()
+        bool_tokens = {"true", "false", "t", "f", "1", "0", "yes", "no", "y", "n"}
+        results["bool"] = round(float(lowered.isin(bool_tokens).mean()) if len(s) else 0.0, 4)
 
     payload = {
         "data_path": str(target),
         "detected_format": fmt,
-        "column": column or "(auto-detected)",
+        "column": column,
         "rows_scanned": rows_scanned,
         "sample_size": len(samples),
-        "parse_success_rate": round(success_rate, 4),
+        "parse_success_rate": results,
         "sample_values": samples[: min(50, len(samples))],
         "time_limited": bool(time_limited),
         "row_limited": bool(row_limited),
@@ -746,6 +1022,7 @@ def detect_datetime_formats(
     return json.dumps(payload, ensure_ascii=False)
 
 
+# 툴: 인코딩 추정
 @tool
 def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
     """텍스트 파일의 인코딩을 간단히 추정."""
@@ -780,6 +1057,7 @@ def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+# 툴: 컬럼 프로파일링
 @tool
 def column_profile(
     path: str,
@@ -883,6 +1161,11 @@ def column_profile(
     return json.dumps(payload, ensure_ascii=False)
 
 
+# =========================
+# 분기: 이미지 폴더 처리
+# =========================
+
+# 툴: 이미지 목록 CSV 생성
 @tool
 def list_images_to_csv(
     dir_path: str,
@@ -917,14 +1200,22 @@ def list_images_to_csv(
     )
 
 
+# =========================
+# 내보내기 목록
+# =========================
 __all__ = [
-    "collect_unique_values",
-    "collect_rare_values",
-    "detect_datetime_formats",
-    "detect_encoding",
-    "column_profile",
+    # 입력/샘플링
     "inspect_input",
     "sample_table",
     "summarize_table",
+    # 전수 스캔(고유값/매핑/희귀)
+    "collect_unique_values",
+    "mapping_coverage_report",
+    "collect_rare_values",
+    # 파싱/인코딩/프로파일
+    "detect_parseability",
+    "detect_encoding",
+    "column_profile",
+    # 이미지
     "list_images_to_csv",
 ]

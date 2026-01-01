@@ -111,22 +111,38 @@
           <div class="stepper-flow" id="stepper">
             <div class="step main" data-stage="queued">대기</div>
             <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="analyzing">분석</div>
+            <div class="step main" data-stage="inspecting">입력 검사</div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="step main" data-stage="sampling">샘플링</div>
+            <div class="arrow" aria-hidden="true">→</div>
+            <div class="step main" data-stage="context">컨텍스트</div>
+            <div class="arrow" aria-hidden="true">→</div>
+            <div class="step main" data-stage="analyzing">요구사항</div>
+            <div class="arrow" aria-hidden="true">→</div>
+            <div class="step main" data-stage="tooling">툴 조사</div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="step main" data-stage="generating">생성</div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="step main" data-stage="executing">실행</div>
             <div class="arrow" aria-hidden="true">→</div>
+            <div class="step main" data-stage="validating">검증</div>
+            <div class="arrow" aria-hidden="true">→</div>
             <div class="step main" data-stage="finalizing">정리</div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="step main" data-stage="done">완료</div>
+            <div class="branch-arrow" aria-hidden="true">↳</div>
+            <div class="step branch" data-stage="refactoring">리팩트</div>
           </div>
           <div class="progress-text">
             <span id="stage-text" class="stage-text">대기 중</span>
             <span id="stage-detail" class="muted"></span>
           </div>
+        </div>
+        <!-- TEMP: tool calls debug panel (remove later) -->
+        <div class="result-group">
+          <div class="label">선택된 툴</div>
+          <div class="muted" id="tool-calls-note"></div>
+          <ul id="tool-calls"></ul>
         </div>
         <details class="result-group collapsible">
           <summary class="label">생성된 코드</summary>
@@ -145,6 +161,6 @@
     </main>
 
     <div id="toast" class="toast hidden"></div>
-    <script src="script.js?v=20251220-5"></script>
+    <script src="script.js?v=20260101-2"></script>
   </body>
 </html>

@@ -84,6 +84,7 @@ class RunResponse(BaseModel):
     messages: List[Message] = Field(default_factory=list)
     run_id: str | None = None
     output_files: List[str] = Field(default_factory=list)
+    tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 _RUN_TTL_SECONDS_DEFAULT = 30 * 60
@@ -481,6 +482,20 @@ def _serialize_messages(messages: Any) -> List[Message]:
 def _serialize_result(result: Dict[str, Any]) -> RunResponse:
     generation = result.get("generation")
     final_user_messages = result.get("final_user_messages")
+
+    def _serialize_tool_calls(val: Any) -> List[Dict[str, Any]]:
+        calls: List[Dict[str, Any]] = []
+        if not val:
+            return calls
+        for item in val:
+            if hasattr(item, "model_dump"):
+                calls.append(item.model_dump())
+            elif isinstance(item, dict):
+                calls.append(dict(item))
+            else:
+                calls.append({"name": str(item)})
+        return calls
+
     def _get(field: str) -> str | None:
         if hasattr(generation, field):
             return getattr(generation, field)
@@ -494,6 +509,7 @@ def _serialize_result(result: Dict[str, Any]) -> RunResponse:
         messages=_serialize_messages(final_user_messages) if final_user_messages else [],
         run_id=str(result.get("run_id") or "") or None,
         output_files=[Path(str(x)).name for x in (result.get("output_files") or [])],
+        tool_calls=_serialize_tool_calls(result.get("planned_tools")),
     )
 
 
@@ -849,13 +865,19 @@ def run_stream(body: RunRequest) -> StreamingResponse:
         last_iterations = 0
         last_stage: Optional[str] = None
         last_state: Optional[Dict[str, Any]] = None
+        last_tool_calls_key: Optional[str] = None
         try:
             yield json.dumps({"type": "stage", "stage": "queued", "detail": "요청 접수"}, ensure_ascii=False) + "\n"
             node_to_stage = {
-                "chatbot": ("analyzing", "요청/데이터 분석 중"),
-                "inspect_input_node": ("sampling", "데이터 샘플링 중"),
+                "inspect_input_node": ("inspecting", "입력 검사 중"),
+                "run_sample_and_summarize": ("sampling", "데이터 샘플링 중"),
+                "run_image_manifest": ("sampling", "이미지 목록 생성 중"),
+                "build_context": ("context", "컨텍스트 구성 중"),
+                "chatbot": ("analyzing", "요구사항 정리 중"),
+                "run_planned_tools": ("tooling", "툴 조사/전수 스캔 중"),
                 "generate": ("generating", "스크립트 생성 중"),
                 "code_check": ("executing", "스크립트 실행 중"),
+                "validate": ("validating", "요구사항 검증 중"),
                 "reflect": ("refactoring", "리팩트 중"),
                 "friendly_error": ("finalizing", "오류 요약 중"),
                 "final_friendly_error": ("finalizing", "오류 요약 중"),
@@ -901,6 +923,20 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                     if isinstance(it, int) and it != last_iterations:
                         last_iterations = it
                         yield json.dumps({"type": "progress", "iterations": it}, ensure_ascii=False) + "\n"
+                    planned_tools = data.get("planned_tools")
+                    if isinstance(planned_tools, list):
+                        serialized = []
+                        for item in planned_tools:
+                            if hasattr(item, "model_dump"):
+                                serialized.append(item.model_dump())
+                            elif isinstance(item, dict):
+                                serialized.append(dict(item))
+                            else:
+                                serialized.append({"name": str(item)})
+                        key = json.dumps(serialized, ensure_ascii=False, sort_keys=True, default=str)
+                        if key != last_tool_calls_key:
+                            last_tool_calls_key = key
+                            yield json.dumps({"type": "tool_calls", "tool_calls": serialized}, ensure_ascii=False) + "\n"
 
             yield json.dumps({"type": "stage", "stage": "finalizing", "detail": "결과 정리 중"}, ensure_ascii=False) + "\n"
             final_state = last_state or initial_state

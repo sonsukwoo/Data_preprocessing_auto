@@ -14,6 +14,8 @@ class ToolCallArgs(BaseModel):
     columns: Optional[list[str]] = Field(default=None, description="복수 컬럼명")
     max_unique: Optional[int] = Field(default=None, description="최대 고유값 수집 개수")
     rare_threshold: Optional[int] = Field(default=None, description="희귀값 기준 빈도")
+    mapping_keys: Optional[list[str]] = Field(default=None, description="매핑 키 목록")
+    parsers: Optional[list[str]] = Field(default=None, description="파싱 검사 유형 목록")
     max_values_return: Optional[int] = Field(default=None, description="리포트에 포함할 값 개수 상한")
     max_rows: Optional[int] = Field(default=None, description="최대 스캔 행 수")
     time_limit_sec: Optional[int] = Field(default=None, description="스캔 타임아웃(초)")

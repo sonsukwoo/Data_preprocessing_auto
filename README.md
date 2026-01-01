@@ -1,6 +1,6 @@
 # 데이터 전처리 에이전트 (LangGraph + FastAPI) — 데모
 
-자연어로 “이 데이터 전처리해줘”를 입력하면, **LangGraph 기반 에이전트가 데이터(파일/폴더/S3)를 샘플링·요약한 뒤 전처리 파이썬 스크립트를 생성/실행하고, 결과 파일을 생성**하는 데모 프로젝트입니다.
+자연어로 “이 데이터 전처리해줘”를 입력하면, **LangGraph 기반 에이전트가 데이터(파일/폴더/S3)를 샘플링·요약한 뒤 요구사항을 정리하고, 필요 시 전수 조사 도구를 호출한 다음 전처리 파이썬 스크립트를 생성/실행해 결과 파일을 생성**하는 데모 프로젝트입니다.
 
 이 프로젝트는 과거 파인튜닝 프로젝트를 진행할 때,
 **전처리 스크립트 작성 → 패키지 설치 → 오류 수정 → 재실행**을 반복하거나
@@ -110,18 +110,19 @@ S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 
 
 ### LangGraph 처리 흐름(핵심)
 
-에이전트는 “요구사항 정리(LLM) → 입력 검사 → 데이터 샘플링/요약 → 코드 생성 → 실행 → 검증”을 수행하고,
+에이전트는 “입력 검사 → 데이터 샘플링/요약 → 요구사항 정리 + 툴 선택(LLM) → 선택된 툴로 전수 조사 → 코드 생성 → 실행 → 검증”을 수행하고,
 실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.
 
 아래는 **축약 버전(입력/샘플링 파트 요약)** 입니다.
 
 ```mermaid
 flowchart TD
-  B[chatbot<br/>요청 분석/요구사항 정리] --> I[inspect_input_node<br/>입력 경로 검사]
-  I --> C[build_context<br/>데이터 샘플링 및 요약]
+  I[inspect_input_node<br/>입력 경로 검사] --> C[build_context<br/>샘플링 및 요약]
   C --> D{error_context?<br/>오류 컨텍스트?}
   D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
-  D -->|아니오| E[generate<br/>코드 생성]
+  D -->|아니오| B[chatbot<br/>요구사항 정리 + 툴 선택]
+  B --> T[run_planned_tools<br/>전수 조사]
+  T --> E[generate<br/>코드 생성]
   E --> F[code_check<br/>실행]
   F --> FE{실행 오류?}
   FE -->|예| R[reflect<br/>리플렉트]
@@ -140,8 +141,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  START([START]) --> C[chatbot<br/>요청 분석 + 요구사항 정리]
-  C --> I0[inspect_input_node<br/>입력 경로 검사]
+  START([START]) --> I0[inspect_input_node<br/>입력 경로 검사]
 
   subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
@@ -156,7 +156,9 @@ flowchart TD
 
   B --> D4{ERROR_CONTEXT?}
   D4 -->|예| FE[friendly_error<br/>에러를 한글로 요약]
-  D4 -->|아니오| G[generate<br/>전처리 스크립트 생성]
+  D4 -->|아니오| C[chatbot<br/>요구사항 정리 + 툴 선택]
+  C --> TP[run_planned_tools<br/>선택된 툴 실행/전수 조사]
+  TP --> G[generate<br/>전처리 스크립트 생성]
 
   G --> E[code_check<br/>코드 실행]
   E --> D5{실행 성공?}
@@ -178,11 +180,12 @@ flowchart TD
 
 
 ### 노드별 역할 요약
-- **chatbot**: LLM이 요청 분석 및 요구사항 정리
+- **chatbot**: LLM이 요청 분석, 요구사항 정리, 필요한 툴 선택
 - **inspect_input_node**: 입력 경로 검사 및 포맷/타입 판별
 - **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성
 - **run_image_manifest**: `list_images_to_csv`를 호출해 이미지 폴더를 CSV 매니페스트로 변환
 - **build_context**: context 확정 및 오류 컨텍스트 설정
+- **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성
 - **generate**: 전처리 파이썬 스크립트 생성
 - **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
@@ -201,11 +204,13 @@ flowchart TD
 1) **입력**: 사용자는 “요청 문장”과(선택) 파일/폴더를 제공  
 2) **입력 검사/고정 분기**: `inspect_input_node`가 경로를 검사하고 입력 타입에 따라 고정 분기  
 3) **샘플링/요약**: 테이블이면 `sample_table` → 요약, 이미지 폴더면 `list_images_to_csv`  
-4) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
-5) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
-6) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
-7) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
-8) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링 요약을 모아 `run_<run_id>_internal_trace_내부기록.md`를 함께 생성
+4) **요구사항 정리 + 툴 선택**: LLM이 샘플링 컨텍스트를 보고 요구사항을 정리하고 필요한 툴을 선택  
+5) **전수 조사**: `run_planned_tools`가 선택된 툴을 실행하고 결과를 context에 추가  
+6) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
+7) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
+8) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
+9) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
+10) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링/전수조사 결과를 모아 `run_<run_id>_internal_trace_내부기록.md`를 함께 생성
 
 ---
 
@@ -255,10 +260,10 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - `run_<run_id>_internal_trace_내부기록.md`
 
 포함 내용:
-- 단계별 타임라인 (`chatbot → inspect_input_node → run_sample_and_summarize/run_image_manifest → build_context → generate → code_check → validate → reflect`)
+- 단계별 타임라인 (`inspect_input_node → run_sample_and_summarize/run_image_manifest → build_context → chatbot → run_planned_tools → generate → code_check → validate → reflect`)
 - 입력 유형에 따라 `run_image_manifest` 경로로 분기될 수 있음
 - 각 iteration에서 생성된 코드(imports + script)
 - 실행 오류(traceback), stdout, validation report
-- 샘플링 결과 요약
+- 샘플링 결과 요약 + 전수 조사(tool_reports)
 
 “블랙박스가 아닌 내부 동작 증빙”에 활용할 수 있습니다.

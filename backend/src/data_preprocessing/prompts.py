@@ -1,5 +1,48 @@
 from langchain_core.prompts import ChatPromptTemplate
 
+# =========================
+# Planning / Tool Selection
+# =========================
+REQUIREMENTS_SYSTEM_PROMPT = """
+사용자 요청에서 요구사항을 구조화해 추출하세요.
+- 요구사항은 사용자의 언어를 유지하세요.
+- 새로운 요구사항을 추가하지 마세요.
+- 파일 경로/URL/ID 같은 부수 정보는 요구사항에서 제외하세요.
+- 각 요구사항은 짧은 동사형 문장으로 작성하세요.
+- 중복은 제거하고 최대 10개만 포함하세요.
+- 숫자/범위/시간/형식 조건은 절대 축약하거나 변경하지 마세요.
+- 금지/제외/예외/형식 지정 문장은 반드시 개별 요구사항으로 포함하세요.
+- 출력 형식(예: 시간 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.
+- requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.
+- tool_calls에는 데이터 조사에 필요한 툴을 선택해서 넣으세요. 필요 없으면 빈 리스트로 두세요.
+- 아래 툴 설명서를 참고해, 요구사항과 샘플링된 데이터에 맞는 툴을 스스로 판단해 선택하세요.
+- 키워드 규칙에 의존하지 말고, 툴의 역할/입출력을 이해해 판단하세요.
+- tool_calls는 필요하다면 여러 개를 동시에 선택해도 됩니다.
+- 서로 다른 조사 목적이 있으면 2~3개까지 병행 선택하세요.
+- tool_calls를 비우는 경우는 데이터 조사가 불필요하다고 확신되는 경우로 제한하세요.
+- tool_calls의 args에는 column(필요 시), mapping_keys(매핑 키 목록), max_rows/time_limit_sec 같은 제한 옵션을 포함할 수 있습니다.
+
+툴 설명서:
+- collect_unique_values: 특정 컬럼의 고유값을 전수 스캔으로 수집해 매핑/치환/분류에 활용.
+- collect_rare_values: 특정 컬럼의 희귀값(빈도 낮은 값)을 전수 스캔으로 수집해 이상치/누락 점검에 활용.
+- mapping_coverage_report: 매핑 키와 실제 고유값을 비교해 누락/초과를 보고.
+- detect_parseability: 특정 컬럼이 datetime/숫자/불리언 등으로 파싱 가능한지 성공률을 점검.
+- detect_encoding: 텍스트 파일 인코딩을 추정.
+- column_profile: 컬럼별 dtype/결측률/샘플값을 요약.
+- 출력은 지정된 스키마에 맞는 JSON만 반환하세요.
+"""
+
+REQUIREMENTS_USER_TEMPLATE = """요청:
+{user_request}
+
+컨텍스트(샘플/요약):
+{context}
+"""
+
+
+# =========================
+# Code Generation
+# =========================
 code_gen_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -17,6 +60,10 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
 - 기본 출력은 CSV이며, 사용자가 명시하면 Excel도 저장합니다. 사용자가 지정하지 않으면 ./outputs에 CSV로 저장하세요.
 - 컨텍스트가 데이터 미리보기 대신 오류 메시지를 포함하면, 실행 실패가 아니라 사용자에게 오류를 보여주고 중단하세요.
 - 컨텍스트의 data_path를 그대로 사용하세요. 경로를 변경하지 마세요.
+- 컨텍스트에 tool_reports가 있으면 반드시 읽고 활용하세요. tool_reports는 코드 작성의 1차 근거입니다.
+- tool_reports가 존재할 때는 그 결과(컬럼, 고유값, 샘플, 통계)를 코드 로직/검증에 반영하세요.
+- 매핑/특징/라벨 생성 시 tool_reports에 나온 고유값(또는 프로파일 샘플)과 키가 일치하도록 구성하세요.
+  부족한 정보가 있어 확정이 어렵다면 임의로 추정하지 말고 __validation_report__에 실패 사유를 기록하세요.
 - 문자열 연산 시 혼합 타입을 안전하게 처리하세요(문자열로 변환, null 가드).
 - 컬럼명을 읽은 직후 아래처럼 정규화해 따옴표/공백으로 인한 KeyError를 방지하세요:
   df.columns = [str(c).strip().strip('\"\\'') for c in df.columns]
@@ -63,6 +110,7 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
 3) 간단 확인을 위해 shape, dtypes, head(5), describe(include='all')를 출력하세요.
 4) 결과를 ./outputs에 저장합니다(없으면 생성). 요청된 포맷만 저장하고, 지정이 없으면 CSV를 기본으로 저장하세요. 파일명은 타임스탬프를 포함하세요.
    - "huggingface"가 요청되면 최종 DataFrame을 DatasetDict(학습 split만으로 충분)로 변환해 `save_to_disk`로 저장하세요. dtypes를 유지하고, image 컬럼이 있으면 `Image()`로 캐스팅하세요.
+5) tool_reports가 있으면 그 결과를 코드에 반영했음을 검증 지표에 드러내세요(예: 매핑 키 집합 비교, 고유값 누락 체크).
 
 제약 조건:
 - 함수/클래스 래퍼 없이 위에서 아래로 실행되는 스크립트여야 합니다.
@@ -87,6 +135,10 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+
+# =========================
+# Reflection / Fix Errors
+# =========================
 reflect_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -115,4 +167,9 @@ reflect_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-__all__ = ["code_gen_prompt", "reflect_prompt"]
+__all__ = [
+    "REQUIREMENTS_SYSTEM_PROMPT",
+    "REQUIREMENTS_USER_TEMPLATE",
+    "code_gen_prompt",
+    "reflect_prompt",
+]
