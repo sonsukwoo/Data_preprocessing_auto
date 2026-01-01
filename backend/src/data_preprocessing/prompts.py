@@ -18,6 +18,8 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
 - 컨텍스트가 데이터 미리보기 대신 오류 메시지를 포함하면, 실행 실패가 아니라 사용자에게 오류를 보여주고 중단하세요.
 - 컨텍스트의 data_path를 그대로 사용하세요. 경로를 변경하지 마세요.
 - 문자열 연산 시 혼합 타입을 안전하게 처리하세요(문자열로 변환, null 가드).
+- 컬럼명을 읽은 직후 아래처럼 정규화해 따옴표/공백으로 인한 KeyError를 방지하세요:
+  df.columns = [str(c).strip().strip('\"\\'') for c in df.columns]
 - 중요: 스크립트 마지막에 JSON 직렬화 가능한 __validation_report__ dict를 반드시 설정하세요. 최소 포함 항목:
   - ok: bool (모든 핵심 요구사항 충족 시에만 True)
   - issues: list[str] (ok=True면 빈 리스트, ok=False면 실패 사유)
@@ -31,6 +33,11 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
   매핑/딕셔너리/lookup으로 컬럼 값을 채우는 경우에는 source 컬럼의 고유값 전체를 수집해 매핑 키와 비교하세요.
   누락이 있으면 즉시 실패하고, 누락 목록/개수를 metrics에 <column>_missing_mapping_count 및 <column>_missing_mapping(또는 missing_<column>)로 기록하세요.
   누락 값을 임의값/대표값으로 채우지 마세요.
+  결측/placeholder 완화를 원할 때만 아래 정책을 명시하세요(기본은 엄격 실패):
+  - allowed_missing: ["Cabin"] 처럼 허용 컬럼 리스트
+  - missing_thresholds: {{"Cabin": 100}} 처럼 허용 임계치(개수) 딕셔너리
+  - placeholder_optional: ["Age"] 처럼 placeholder 허용 컬럼
+  - placeholder_required: ["Fare"] 처럼 반드시 placeholder 지표를 요구할 컬럼
 """,
         ),
         (

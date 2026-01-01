@@ -6,6 +6,29 @@ from langgraph.graph import MessagesState
 from pydantic import BaseModel, Field
 
 
+class ToolCallArgs(BaseModel):
+    """툴 호출 파라미터(스키마 고정)."""
+
+    path: Optional[str] = Field(default=None, description="데이터 파일/폴더 경로")
+    column: Optional[str] = Field(default=None, description="단일 컬럼명")
+    columns: Optional[list[str]] = Field(default=None, description="복수 컬럼명")
+    max_unique: Optional[int] = Field(default=None, description="최대 고유값 수집 개수")
+    rare_threshold: Optional[int] = Field(default=None, description="희귀값 기준 빈도")
+    max_values_return: Optional[int] = Field(default=None, description="리포트에 포함할 값 개수 상한")
+    max_rows: Optional[int] = Field(default=None, description="최대 스캔 행 수")
+    time_limit_sec: Optional[int] = Field(default=None, description="스캔 타임아웃(초)")
+    chunksize: Optional[int] = Field(default=None, description="청크 사이즈")
+    sample_bytes: Optional[int] = Field(default=None, description="인코딩 추정용 샘플 바이트 수")
+    max_columns: Optional[int] = Field(default=None, description="프로파일링 최대 컬럼 수")
+    sample_values_limit: Optional[int] = Field(default=None, description="프로파일 샘플 값 개수")
+class ToolCall(BaseModel):
+    """LLM이 선택한 데이터 조사 툴 호출."""
+
+    name: str = Field(description="Tool name to call")
+    args: ToolCallArgs = Field(default_factory=ToolCallArgs, description="Arguments for the tool")
+    reason: str = Field(default="", description="Why this tool is needed (short)")
+
+
 class Requirement(BaseModel):
     """사용자 요구사항을 검증 가능한 단위로 쪼갠 항목."""
 
@@ -21,6 +44,10 @@ class RequirementsPayload(BaseModel):
     requirements_prompt: str = Field(
         default="",
         description="Code-generation-friendly summary of user requirements",
+    )
+    tool_calls: list[ToolCall] = Field(
+        default_factory=list,
+        description="Optional tool calls for data inspection prior to code generation.",
     )
 
 
@@ -44,6 +71,8 @@ class State(MessagesState):
     output_formats: Optional[str]
     requirements: Optional[list[Requirement]] = None
     requirements_prompt: Optional[str] = None
+    planned_tools: Optional[list[ToolCall]] = None
+    tool_reports: Optional[list[dict[str, Any]]] = None
     output_files: Optional[list[str]] = None
     tool_call_name: Optional[str] = None
     tool_call_args: Optional[dict[str, Any]] = None
@@ -58,4 +87,4 @@ class State(MessagesState):
     trace: Optional[list[dict[str, Any]]] = None
 
 
-__all__ = ["Requirement", "RequirementsPayload", "CodeBlocks", "State"]
+__all__ = ["ToolCallArgs", "ToolCall", "Requirement", "RequirementsPayload", "CodeBlocks", "State"]

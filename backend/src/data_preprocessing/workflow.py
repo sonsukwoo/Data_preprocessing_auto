@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import json
-import os
-import traceback
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -15,32 +11,47 @@ from langgraph.graph import END, START, StateGraph
 
 from .models import CodeBlocks, RequirementsPayload, State
 from .prompts import code_gen_prompt, reflect_prompt
-from .tools import inspect_input, list_images_to_csv, sample_table, summarize_table
+from .tools import (
+    collect_rare_values,
+    collect_unique_values,
+    column_profile,
+    detect_datetime_formats,
+    detect_encoding,
+    inspect_input,
+    list_images_to_csv,
+    sample_table,
+    summarize_table,
+)
 from .common_utils import (
     append_trace,
     cleanup_dir,
     detect_sample_fallback,
+    extract_input_path,
     extract_last_message_text,
     extract_user_request,
     now_iso,
-    outputs_root_dir,
+    prepare_execution_workdir,
     promote_staged_outputs,
+    run_generated_code,
     safe_format_json_like,
     safe_last_message,
+    truncate_text,
     diff_generation,
     write_internal_trace_markdown,
 )
 
 
 # ========================== 노드 함수: 실제 작업을 수행하는 노드 정의 ==================================
-# chatbot: 요구사항 추출 + user_request 유지
+# chatbot: 요구사항 추출 + 툴 선택
 def chatbot(state: State, llm_gpt: ChatOpenAI):
-    """요구사항 구조화 + user_request 유지 (툴 선택은 하지 않음)."""
+    """요구사항 구조화 + 툴 선택."""
     user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
+    context = state.get("context") or ""
     messages = list(state.get("messages", []) or [])
 
     reqs = []
     requirements_prompt = ""
+    planned_tools = []
     reqs_error = None
     try:
         requirements_system = (
@@ -54,13 +65,29 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
             "- 금지/제외/예외/형식 지정 문장은 반드시 개별 요구사항으로 포함하세요.\n"
             "- 출력 형식(예: 시간 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.\n"
             "- requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.\n"
+            "- tool_calls에는 데이터 조사에 필요한 툴을 선택해서 넣으세요. 필요 없으면 빈 리스트로 두세요.\n"
+            "- 사용 가능한 툴: collect_unique_values, collect_rare_values, detect_datetime_formats, detect_encoding, column_profile\n"
+            "- 매핑/치환/딕셔너리 요구가 있으면 collect_unique_values/collect_rare_values를 우선 고려하세요.\n"
+            "- 날짜/시간 포맷 요구가 있으면 detect_datetime_formats를 고려하세요.\n"
+            "- 인코딩/한글 깨짐 이슈가 있으면 detect_encoding을 고려하세요.\n"
+            "- 결측/타입/분포 확인이 필요하면 column_profile을 고려하세요.\n"
+            "- tool_calls의 args에는 column(필요 시), max_rows/time_limit_sec 같은 제한 옵션을 포함할 수 있습니다.\n"
             "- 출력은 지정된 스키마에 맞는 JSON만 반환하세요."
         )
         structurer = llm_gpt.with_structured_output(RequirementsPayload)
-        payload = structurer.invoke([("system", requirements_system), ("user", user_req)])
+        payload = structurer.invoke(
+            [
+                ("system", requirements_system),
+                (
+                    "user",
+                    f"요청:\n{user_req}\n\n컨텍스트(샘플/요약):\n{context}",
+                ),
+            ]
+        )
         if isinstance(payload, RequirementsPayload):
             reqs = payload.requirements or []
             requirements_prompt = (payload.requirements_prompt or "").strip()
+            planned_tools = payload.tool_calls or []
             if reqs:
                 requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs])
                 if requirements_prompt:
@@ -75,6 +102,7 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
         "user_request": user_req,
         "requirements": reqs,
         "requirements_prompt": requirements_prompt or None,
+        "planned_tools": planned_tools or None,
         "phase": "analyzing",
         **append_trace(
             state,
@@ -86,58 +114,18 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
                 "user_request": user_req,
                 "requirements": [r.model_dump() for r in reqs],
                 "requirements_prompt": requirements_prompt or None,
+                "planned_tools": [t.model_dump() for t in (planned_tools or [])],
+                "tool_calls": [t.model_dump() for t in (planned_tools or [])],
                 "requirements_error": reqs_error,
             },
         ),
     }
 
-_PATH_HINT_EXTS = {
-    ".csv",
-    ".tsv",
-    ".json",
-    ".jsonl",
-    ".parquet",
-    ".feather",
-    ".arrow",
-    ".xlsx",
-    ".xls",
-    ".zip",
-}
-
-
-def _extract_input_path(user_request: str) -> str | None:
-    text = (user_request or "").strip()
-    if not text:
-        return None
-    if text[0] in {"'", '"'}:
-        quote = text[0]
-        end = text.find(quote, 1)
-        if end > 1:
-            candidate = text[1:end].strip()
-            if candidate:
-                return candidate
-    candidate = text.split()[0].strip()
-    if not candidate:
-        return None
-    if candidate.startswith(("s3://", "/", "./", "../", "~")):
-        return candidate
-    if "/" in candidate or "\\" in candidate:
-        return candidate
-    if Path(candidate).suffix.lower() in _PATH_HINT_EXTS:
-        return candidate
-    try:
-        if Path(candidate).expanduser().resolve().exists():
-            return candidate
-    except Exception:
-        pass
-    return None
-
-
 # inspect_input_node: 입력 경로 검사(파일/폴더/이미지 여부 판단)
 def inspect_input_node(state: State):
     """inspect_input을 실행해 입력 상태를 구조화."""
     user_request = state.get("user_request") or extract_user_request(state.get("messages", []))
-    input_path = _extract_input_path(user_request or "")
+    input_path = extract_input_path(user_request or "")
     context_candidate: Optional[str] = None
     inspect_info: Optional[dict[str, Any]] = None
 
@@ -281,6 +269,100 @@ def build_context(state: State):
                 "iterations": int(state.get("iterations", 0) or 0),
                 "user_request": user_request,
                 "context": context_candidate,
+            },
+        ),
+    }
+
+
+# run_planned_tools: LLM이 선택한 툴을 실행해 컨텍스트 보강
+def run_planned_tools(state: State):
+    """요구사항에서 선택한 툴을 실행해 컨텍스트를 확장."""
+    context = state.get("context") or ""
+    planned = state.get("planned_tools") or []
+    inspect_info = state.get("inspect_result") or {}
+    default_path = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
+
+    tool_map = {
+        "collect_unique_values": collect_unique_values,
+        "collect_rare_values": collect_rare_values,
+        "detect_datetime_formats": detect_datetime_formats,
+        "detect_encoding": detect_encoding,
+        "column_profile": column_profile,
+    }
+
+    tool_reports: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for tool_call in planned:
+        if hasattr(tool_call, "name"):
+            name = tool_call.name
+            raw_args = getattr(tool_call, "args", None)
+            if raw_args is None:
+                args = {}
+            elif hasattr(raw_args, "model_dump"):
+                args = raw_args.model_dump()
+            else:
+                args = dict(raw_args) if isinstance(raw_args, dict) else {}
+            reason = getattr(tool_call, "reason", "") or ""
+        elif isinstance(tool_call, dict):
+            name = str(tool_call.get("name") or "")
+            args = dict(tool_call.get("args") or {})
+            reason = str(tool_call.get("reason") or "")
+        else:
+            continue
+
+        if not name:
+            continue
+        if "path" not in args and default_path:
+            args["path"] = default_path
+
+        key = json.dumps({"name": name, "args": args}, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        tool_fn = tool_map.get(name)
+        if tool_fn is None:
+            output = f"ERROR_CONTEXT||UnknownTool||{name}"
+        else:
+            try:
+                output = tool_fn.invoke(args)
+            except Exception as exc:  # noqa: BLE001
+                output = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+        tool_reports.append(
+            {
+                "name": name,
+                "args": args,
+                "reason": reason,
+                "output": output,
+            }
+        )
+
+    if tool_reports:
+        lines = ["", "tool_reports:"]
+        for rep in tool_reports:
+            lines.append(f"- name: {rep['name']}")
+            if rep.get("reason"):
+                lines.append(f"  reason: {rep['reason']}")
+            args_text = json.dumps(rep.get("args") or {}, ensure_ascii=False, default=str)
+            lines.append(f"  args: {args_text}")
+            lines.append("  output:")
+            lines.append(truncate_text(str(rep.get("output") or ""), limit=4000))
+        context = (context + "\n" if context else "") + "\n".join(lines)
+
+    return {
+        "context": context,
+        "tool_reports": tool_reports or None,
+        "phase": "sampling",
+        **append_trace(
+            state,
+            {
+                "ts": now_iso(),
+                "node": "run_planned_tools",
+                "phase": "sampling",
+                "iterations": int(state.get("iterations", 0) or 0),
+                "tool_reports": tool_reports,
             },
         ),
     }
@@ -443,29 +525,24 @@ def code_check(state: State):
             ),
         }
 
-    stdout_buffer = io.StringIO()
-    exec_globals: Dict[str, Any] = {}
-    prev_cwd = os.getcwd()
-    staging_root = outputs_root_dir() / "_staging"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    execution_workdir = staging_root / f"run_{uuid4().hex}"
-    execution_workdir.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chdir(str(execution_workdir))
-        with contextlib.redirect_stdout(stdout_buffer):
-            exec(imports + "\n" + code, exec_globals)
-    except SystemExit as exc:
-        os.chdir(prev_cwd)
+    execution_workdir = prepare_execution_workdir()
+    exec_globals, output_preview, error_kind, error_detail = run_generated_code(
+        imports, code, execution_workdir
+    )
+    if error_kind:
         cleanup_dir(execution_workdir)
-        captured = stdout_buffer.getvalue()
-        error_detail = captured + "\n" + f"SystemExit: {getattr(exc, 'code', exc)}\n" + traceback.format_exc()
-        error_message = [("user", f"Your solution called exit() during execution (this is not allowed): {error_detail}")]
+        if error_kind == "system_exit":
+            error_message = [
+                ("user", f"Your solution called exit() during execution (this is not allowed): {error_detail}")
+            ]
+        else:
+            error_message = [("user", f"Your solution failed during execution: {error_detail}")]
         return {
             "generation": code_solution,
             "messages": error_message,
             "error": "yes",
             "phase": "executing",
-            "execution_stdout": captured,
+            "execution_stdout": output_preview,
             **append_trace(
                 state,
                 {
@@ -475,48 +552,11 @@ def code_check(state: State):
                     "iterations": int(state.get("iterations", 0) or 0),
                     "error": "yes",
                     "error_detail": error_detail,
-                    "execution_stdout": captured,
+                    "execution_stdout": output_preview,
                     "generation": {"imports": imports, "code": code},
                 },
             ),
         }
-    except BaseException as exc:  # noqa: BLE001
-        # 호스트에서 인터럽트가 오면 서버가 정상 종료되도록 그대로 전파
-        if isinstance(exc, KeyboardInterrupt):
-            raise
-        os.chdir(prev_cwd)
-        cleanup_dir(execution_workdir)
-        captured = stdout_buffer.getvalue()
-        error_detail = captured + "\n" + traceback.format_exc()
-        error_message = [("user", f"Your solution failed during execution: {error_detail}")]
-        return {
-            "generation": code_solution,
-            "messages": error_message,
-            "error": "yes",
-            "phase": "executing",
-            "execution_stdout": captured,
-            **append_trace(
-                state,
-                {
-                    "ts": now_iso(),
-                    "node": "code_check",
-                    "phase": "executing",
-                    "iterations": int(state.get("iterations", 0) or 0),
-                    "error": "yes",
-                    "error_detail": error_detail,
-                    "execution_stdout": captured,
-                    "generation": {"imports": imports, "code": code},
-                },
-            ),
-        }
-    finally:
-        # 이후 stdout 추출이 실패하더라도, 작업 디렉터리는 최대한 원복
-        try:
-            os.chdir(prev_cwd)
-        except Exception:  # noqa: BLE001
-            pass
-
-    output_preview = stdout_buffer.getvalue()
     preview_tail = output_preview[-2000:] if len(output_preview) > 2000 else output_preview
     message = [("user", f"Execution preview (truncated):\n{preview_tail}")]
     validation_report = exec_globals.get("__validation_report__")
@@ -550,6 +590,73 @@ def validate(state: State):
     reqs = state.get("requirements") or []
     workdir_str = state.get("execution_workdir") or ""
     execution_workdir = Path(workdir_str) if workdir_str else None
+
+    # 내부 유틸: bool/숫자/리스트 정규화(검증 안정성 강화)
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"true", "1", "yes", "y", "ok", "pass", "passed"}:
+                return True
+            if v in {"false", "0", "no", "n", "fail", "failed"}:
+                return False
+        return None
+
+    def _coerce_number(value):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    def _collect_list(*candidates):
+        items: list[str] = []
+        for c in candidates:
+            if c is None:
+                continue
+            if isinstance(c, str):
+                raw = c.strip()
+                if not raw:
+                    continue
+                if raw.startswith(("[", "{")) and raw.endswith(("]", "}")):
+                    try:
+                        parsed = json.loads(raw)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, (list, tuple, set)):
+                        for x in parsed:
+                            s = str(x).strip().strip("'\"")
+                            if s:
+                                items.append(s)
+                        continue
+                    if isinstance(parsed, str):
+                        raw = parsed.strip()
+                raw = raw.strip("'\"")
+                if raw:
+                    items.append(raw)
+                continue
+            if isinstance(c, (list, tuple, set)):
+                for x in c:
+                    s = str(x).strip().strip("'\"")
+                    if s:
+                        items.append(s)
+        return set(items)
+
+    def _coerce_thresholds(value):
+        if not isinstance(value, dict):
+            return {}
+        thresholds: dict[str, float] = {}
+        for k, v in value.items():
+            num = _coerce_number(v)
+            if num is not None:
+                thresholds[str(k)] = float(num)
+        return thresholds
 
     # 생성 스크립트가 validation report를 만들지 못하면, 강제로 수정(reflect) 루프로 보낸다.
     if not isinstance(report, dict):
@@ -611,7 +718,10 @@ def validate(state: State):
             ),
         }
 
-    ok = report.get("ok")
+    ok_raw = report.get("ok")
+    ok = _coerce_bool(ok_raw)
+    if ok is None:
+        ok = False
 
     # 방어적 처리: metrics가 결측/placeholder/fallback 사용을 시사하면 ok=True를 그대로 신뢰하지 않는다.
     metrics = report.get("metrics")
@@ -639,9 +749,43 @@ def validate(state: State):
                     "error": "yes",
                     "validation_report": report,
                     "last_message": safe_last_message(state.get("messages", [])),
-                },
-            ),
-        }
+                    },
+                ),
+            }
+
+    # 결측/placeholder 정책: 기본은 엄격, 명시된 경우만 완화
+    if isinstance(metrics, dict):
+        allowed_missing_cols = _collect_list(
+            report.get("allowed_missing"),
+            report.get("allowed_missing_cols"),
+            report.get("missing_allowlist"),
+            metrics.get("allowed_missing"),
+            metrics.get("allowed_missing_cols"),
+            metrics.get("missing_allowlist"),
+        )
+        missing_thresholds = _coerce_thresholds(
+            report.get("missing_thresholds")
+            or report.get("allowed_missing_thresholds")
+            or metrics.get("missing_thresholds")
+            or metrics.get("allowed_missing_thresholds")
+        )
+        placeholder_required = _collect_list(
+            report.get("placeholder_required"),
+            report.get("required_placeholder"),
+            metrics.get("placeholder_required"),
+            metrics.get("required_placeholder"),
+        )
+        placeholder_optional = _collect_list(
+            report.get("placeholder_optional"),
+            report.get("optional_placeholder"),
+            metrics.get("placeholder_optional"),
+            metrics.get("optional_placeholder"),
+        )
+    else:
+        allowed_missing_cols = set()
+        missing_thresholds = {}
+        placeholder_required = set()
+        placeholder_optional = set()
 
     # 사용자 요구사항 강제: 요구사항 누락/실패 시 리팩트(reflect) 루프로 보낸다.
     if reqs:
@@ -683,12 +827,14 @@ def validate(state: State):
                 missing_ids.append(r.id)
                 continue
             v = report_reqs.get(r.id)
-            if isinstance(v, bool):
-                passed = v
-            elif isinstance(v, dict):
-                passed = bool(v.get("ok"))
+            if isinstance(v, dict):
+                passed = _coerce_bool(v.get("ok"))
+                if passed is None:
+                    passed = bool(v.get("ok"))
             else:
-                passed = False
+                passed = _coerce_bool(v)
+                if passed is None:
+                    passed = False
             if not passed:
                 failed_ids.append(r.id)
 
@@ -735,6 +881,13 @@ def validate(state: State):
 
         missing_placeholder_metrics: list[str] = []
         for p in prefixes:
+            # 기본은 엄격, 명시된 경우만 완화
+            if p in allowed_missing_cols:
+                continue
+            if p in placeholder_optional:
+                continue
+            if placeholder_required and p not in placeholder_required:
+                continue
             has_placeholder = any(
                 str(k).startswith(p) and any(tok in str(k).lower() for tok in ("placeholder", "fallback"))
                 for k in metrics.keys()
@@ -810,10 +963,30 @@ def validate(state: State):
         for k, v in metrics.items():
             if type(v) is bool:
                 continue
-            if isinstance(v, (int, float)):
-                key = str(k).lower()
-                if any(tok in key for tok in ("missing", "empty", "placeholder", "fallback")) and v > 0:
-                    metric_flags.append(f"{k}={v}")
+            num = _coerce_number(v)
+            if num is None:
+                continue
+            key = str(k).lower()
+            if any(tok in key for tok in ("missing", "empty", "placeholder", "fallback")) and num > 0:
+                col = None
+                for suffix in ("_missing", "_empty", "_placeholder", "_fallback"):
+                    if str(k).endswith(suffix):
+                        col = str(k)[: -len(suffix)]
+                        break
+                if col:
+                    if col in allowed_missing_cols:
+                        continue
+                    if col in missing_thresholds:
+                        total_missing = 0.0
+                        miss_key = f"{col}_missing"
+                        empty_key = f"{col}_empty"
+                        total_missing += float(_coerce_number(metrics.get(miss_key)) or 0.0)
+                        total_missing += float(_coerce_number(metrics.get(empty_key)) or 0.0)
+                        if total_missing <= float(missing_thresholds[col]):
+                            continue
+                    if col in placeholder_optional:
+                        continue
+                metric_flags.append(f"{k}={num}")
 
     if ok is True and not metric_flags:
         moved = []
@@ -973,7 +1146,7 @@ def route_after_context(state: State):
     ctx = state.get("context", "")
     if isinstance(ctx, str) and ctx.startswith("ERROR_CONTEXT||"):
         return "friendly_error"
-    return "generate"
+    return "chatbot"
 
 def decide_to_finish(state: State, max_iterations: int):
     """실패 시 reflect/최종에러 분기 결정."""
@@ -1006,13 +1179,14 @@ def build_graph(
     graph_builder = StateGraph(State)
 
     # ===== 노드: 그래프에 노드 추가 =====
-    # 요청 해석 + tool call 결정
-    graph_builder.add_node("chatbot", partial(chatbot, llm_gpt=llm_gpt))
     # 입력 검사 + 샘플링/요약 단계 구성
     graph_builder.add_node("inspect_input_node", inspect_input_node)
     graph_builder.add_node("run_image_manifest", run_image_manifest)
     graph_builder.add_node("run_sample_and_summarize", run_sample_and_summarize)
     graph_builder.add_node("build_context", build_context)
+    # 요구사항 정리 + 툴 선택 + 툴 실행
+    graph_builder.add_node("chatbot", partial(chatbot, llm_gpt=llm_gpt))
+    graph_builder.add_node("run_planned_tools", run_planned_tools)
     # 에러/코드 생성/실행/검증/리플렉트
     graph_builder.add_node("friendly_error", partial(friendly_error, llm_gpt=llm_gpt))
     graph_builder.add_node("final_friendly_error", partial(final_friendly_error, llm_gpt=llm_gpt))
@@ -1024,10 +1198,7 @@ def build_graph(
 
 
     # ===== 엣지: 노드 연결 정의 =====
-    graph_builder.add_edge(START, "chatbot")
-
-    # chatbot 이후: 입력 검사 노드로 이동
-    graph_builder.add_edge("chatbot", "inspect_input_node")
+    graph_builder.add_edge(START, "inspect_input_node")
 
     # inspect_input 이후: 이미지/샘플/에러 분기
     graph_builder.add_conditional_edges(
@@ -1044,12 +1215,18 @@ def build_graph(
     graph_builder.add_edge("run_sample_and_summarize", "build_context")
     graph_builder.add_edge("run_image_manifest", "build_context")
 
-    # build_context 이후: 오류면 friendly_error, 정상이면 generate
+    # build_context 이후: 오류면 friendly_error, 정상이면 chatbot
     graph_builder.add_conditional_edges(
         "build_context",
         route_after_context,
-        {"friendly_error": "friendly_error", "generate": "generate"},
+        {"friendly_error": "friendly_error", "chatbot": "chatbot"},
     )
+
+    # chatbot 이후: 선택된 툴 실행
+    graph_builder.add_edge("chatbot", "run_planned_tools")
+
+    # tool 실행 후: 코드 생성
+    graph_builder.add_edge("run_planned_tools", "generate")
 
     # generate → code_check
     graph_builder.add_edge("generate", "code_check")
@@ -1108,6 +1285,8 @@ def run_request(
         "coder_model": coder_model,
         "tool_call_name": None,
         "tool_call_args": None,
+        "planned_tools": None,
+        "tool_reports": None,
         "inspect_result": None,
         "sample_json": None,
         "summary_context": None,

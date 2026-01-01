@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import difflib
+import io
 import json
+import os
 import re
 import shutil
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +23,48 @@ def now_iso() -> str:
 def outputs_root_dir() -> Path:
     # backend/src/data_preprocessing/common_utils.py 기준 parents[2] == backend/
     return Path(__file__).resolve().parents[2] / "outputs"
+
+# ========================== Used by: inspect_input_node ==========================
+_PATH_HINT_EXTS = {
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".parquet",
+    ".feather",
+    ".arrow",
+    ".xlsx",
+    ".xls",
+    ".zip",
+}
+
+
+def extract_input_path(user_request: str) -> str | None:
+    text = (user_request or "").strip()
+    if not text:
+        return None
+    if text[0] in {"'", '"'}:
+        quote = text[0]
+        end = text.find(quote, 1)
+        if end > 1:
+            candidate = text[1:end].strip()
+            if candidate:
+                return candidate
+    candidate = text.split()[0].strip()
+    if not candidate:
+        return None
+    if candidate.startswith(("s3://", "/", "./", "../", "~")):
+        return candidate
+    if "/" in candidate or "\\" in candidate:
+        return candidate
+    if Path(candidate).suffix.lower() in _PATH_HINT_EXTS:
+        return candidate
+    try:
+        if Path(candidate).expanduser().resolve().exists():
+            return candidate
+    except Exception:
+        pass
+    return None
 
 # ========================== Trace/메시지 유틸 ==========================
 def append_trace(state: State | dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +139,55 @@ def detect_sample_fallback(code: str) -> str | None:
                 return "pd.DataFrame created under missing-file guard"
     return None
 
+
+# ========================== Used by: code_check ==========================
+def prepare_execution_workdir() -> Path:
+    staging_root = outputs_root_dir() / "_staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    execution_workdir = staging_root / f"run_{uuid4().hex}"
+    execution_workdir.mkdir(parents=True, exist_ok=True)
+    return execution_workdir
+
+
+def run_generated_code(
+    imports: str,
+    code: str,
+    execution_workdir: Path,
+) -> tuple[dict[str, Any], str, str | None, str | None]:
+    stdout_buffer = io.StringIO()
+    exec_globals: dict[str, Any] = {}
+    prev_cwd = os.getcwd()
+    try:
+        os.chdir(str(execution_workdir))
+        with contextlib.redirect_stdout(stdout_buffer):
+            exec(imports + "\n" + code, exec_globals)
+    except SystemExit as exc:
+        try:
+            os.chdir(prev_cwd)
+        except Exception:
+            pass
+        captured = stdout_buffer.getvalue()
+        error_detail = (
+            captured + "\n" + f"SystemExit: {getattr(exc, 'code', exc)}\n" + traceback.format_exc()
+        )
+        return exec_globals, captured, "system_exit", error_detail
+    except BaseException as exc:  # noqa: BLE001
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        try:
+            os.chdir(prev_cwd)
+        except Exception:
+            pass
+        captured = stdout_buffer.getvalue()
+        error_detail = captured + "\n" + traceback.format_exc()
+        return exec_globals, captured, "exception", error_detail
+    finally:
+        try:
+            os.chdir(prev_cwd)
+        except Exception:  # noqa: BLE001
+            pass
+    output_preview = stdout_buffer.getvalue()
+    return exec_globals, output_preview, None, None
 
 # ========================== 파일/출력 유틸 ==========================
 def cleanup_dir(path: Path) -> None:
@@ -465,11 +560,14 @@ __all__ = [
     "cleanup_dir",
     "detect_sample_fallback",
     "diff_generation",
+    "extract_input_path",
     "extract_last_message_text",
     "extract_user_request",
     "now_iso",
     "outputs_root_dir",
+    "prepare_execution_workdir",
     "promote_staged_outputs",
+    "run_generated_code",
     "safe_format_json_like",
     "safe_last_message",
     "truncate_text",

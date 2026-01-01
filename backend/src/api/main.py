@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import traceback
@@ -35,6 +36,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ensure_api_keys(ROOT_DIR / ".env")
 
 app = FastAPI(title="Data Preprocessing Agent API", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 # 모델 선택 허용 리스트 (프론트 옵션과 동일하게 유지)
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
@@ -652,6 +654,8 @@ def _get_s3_client():
     )
 
 
+
+
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
     if not uri.startswith("s3://"):
         raise ValueError("not an s3 uri")
@@ -799,6 +803,7 @@ def run(body: RunRequest) -> RunResponse:
         # Generated code may accidentally call exit(); do not crash the API process.
         raise HTTPException(status_code=400, detail=f"생성된 코드가 exit()를 호출했습니다: {getattr(exc, 'code', exc)}") from exc
     except Exception as exc:  # noqa: BLE001
+        logger.exception("그래프 실행 실패")
         if os.getenv("DEBUG_TRACEBACK", "").strip():
             tb = traceback.format_exc()
             raise HTTPException(status_code=500, detail=f"그래프 실행 실패: {exc}\n{tb}") from exc
@@ -920,11 +925,13 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                 ensure_ascii=False,
             ) + "\n"
         except Exception as exc:  # noqa: BLE001
+            logger.exception("그래프 실행 실패 (stream)")
             if os.getenv("DEBUG_TRACEBACK", "").strip():
                 tb = traceback.format_exc()
-                yield json.dumps({"type": "error", "detail": f"그래프 실행 실패: {exc}\n{tb}"}, ensure_ascii=False) + "\n"
+                detail = f"그래프 실행 실패: {exc}\n{tb}"
             else:
-                yield json.dumps({"type": "error", "detail": f"그래프 실행 실패: {exc}"}, ensure_ascii=False) + "\n"
+                detail = f"그래프 실행 실패: {exc}"
+            yield json.dumps({"type": "error", "detail": detail}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(_iter_ndjson(), media_type="application/x-ndjson")
 

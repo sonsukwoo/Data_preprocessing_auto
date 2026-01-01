@@ -2,6 +2,7 @@
 .vscode/
 DOCKER.md
 AGENTS.md
+docker-compose.yml
 
 # Secrets / local config
 .env
