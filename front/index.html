@@ -33,10 +33,6 @@
             <div class="step-title"><span class="step-num">2</span>데이터 업로드</div>
             <div class="dropzone" id="dropzone">
               <input type="file" id="file-input" multiple webkitdirectory />
-              <div class="upload-row">
-                <label class="file-btn" for="file-input">파일/폴더 선택</label>
-                <span id="file-summary" class="file-summary">선택된 파일 없음</span>
-              </div>
               <p class="upload-hint">CSV/TSV/JSON/Excel/Parquet/Arrow/Feather, 또는 이미지 폴더를 지원합니다.</p>
               <div class="upload-status-row">
                 <span id="upload-status" class="muted"></span>
@@ -61,7 +57,7 @@
 
               <div class="grid">
                 <label>
-                  대화 모델
+                  분석 모델
                   <select id="llm_model">
                     <option value="gpt-4.1-nano">빠름 (gpt-4.1-nano)</option>
                     <option value="gpt-4o-mini" selected>기본 (gpt-4o-mini)</option>
@@ -96,16 +92,16 @@
           <div class="progress-top">
             <div class="label">진행 상황</div>
             <div class="progress-meta">
-              <details id="refactor-details" class="refactor-details">
-                <summary class="refactor-pill">
-                  <span class="refactor-pill-label">리팩트</span>
-                  <span id="refactor-count-inline" class="refactor-badge">0</span>
-                </summary>
-                <div class="refactor-panel">
-                  <div class="refactor-panel-title">최근 리팩트</div>
-                  <ul id="refactor-events" class="refactor-events"></ul>
-                </div>
-              </details>
+                <details id="refactor-details" class="refactor-details">
+                  <summary class="refactor-pill">
+                    <span class="refactor-pill-label">리팩트</span>
+                    <span id="refactor-count-inline" class="refactor-badge">0</span>
+                  </summary>
+                  <div class="refactor-panel">
+                    <div class="refactor-panel-title">최근 리팩트</div>
+                    <ul id="refactor-events" class="refactor-events"></ul>
+                  </div>
+                </details>
             </div>
           </div>
           <div class="stepper-flow" id="stepper">
@@ -130,8 +126,7 @@
             <div class="step main" data-stage="finalizing">정리</div>
             <div class="arrow" aria-hidden="true">→</div>
             <div class="step main" data-stage="done">완료</div>
-            <div class="branch-arrow" aria-hidden="true">↳</div>
-            <div class="step branch" data-stage="refactoring">리팩트</div>
+            <!-- 리팩트 브랜치 표시 제거 -->
           </div>
           <div class="progress-text">
             <span id="stage-text" class="stage-text">대기 중</span>

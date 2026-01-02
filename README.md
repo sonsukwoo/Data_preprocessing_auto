@@ -98,8 +98,8 @@ flowchart LR
   N -->|"API proxy"| A["FastAPI backend 8000"]
   A --> G["LangGraph Agent"]
   G -->|"inspect + fixed routing"| T["inspect_input_node"]
-  T -->|"table"| S["run_sample_and_summarize<br/>(node)"]
-  T -->|"images"| IM["run_image_manifest<br/>(node)"]
+  T -->|"table"| S["run_sample_and_summarize\n(node)"]
+  T -->|"images"| IM["run_image_manifest\n(node)"]
   S --> C["build_context"]
   IM --> C
   G -->|"LLM toolcalls"| TP["run_planned_tools"]
@@ -122,17 +122,17 @@ S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 
 
 ```mermaid
 flowchart TD
-  I[inspect_input_node<br/>입력 경로 검사] --> C[build_context<br/>샘플링 및 요약]
-  C --> D{error_context?<br/>오류 컨텍스트?}
-  D -->|예| X[friendly_error<br/>친절 오류] --> H[END<br/>완료]
-  D -->|아니오| B[chatbot<br/>요구사항 정리 + 툴 선택]
-  B --> T[run_planned_tools<br/>전수 조사(툴콜)]
-  T --> TS[툴 목록<br/>collect_unique_values / mapping_coverage_report / collect_rare_values / detect_parseability / detect_encoding / column_profile]
-  T --> E[generate<br/>코드 생성]
-  E --> F[code_check<br/>실행]
+  I[inspect_input_node\n입력 경로 검사] --> C[build_context\n샘플링 및 요약]
+  C --> D{error_context?\n오류 컨텍스트?}
+  D -->|예| X[friendly_error\n친절 오류] --> H[END\n완료]
+  D -->|아니오| B[chatbot\n요구사항 정리 + 툴 선택]
+  B --> T[run_planned_tools\n전수 조사(툴콜)]
+  T --> TS["툴 목록\ncollect_unique_values\nmapping_coverage_report\ncollect_rare_values\ndetect_parseability\ndetect_encoding\ncolumn_profile"]
+  T --> E[generate\n코드 생성]
+  E --> F[code_check\n실행]
   F --> FE{실행 오류?}
-  FE -->|예| R[reflect<br/>리플렉트]
-  FE -->|아니오| G{validate<br/>검증}
+  FE -->|예| R[reflect\n리플렉트]
+  FE -->|아니오| G{validate\n검증}
   G -->|통과| H
   G -->|실패| R
   R --> F
@@ -147,37 +147,37 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  START([START]) --> I0[inspect_input_node<br/>입력 경로 검사]
+  START([START]) --> I0[inspect_input_node\n입력 경로 검사]
 
   subgraph INPUT["데이터 샘플링 및 요약 파트"]
     direction TB
     I0 --> D1{입력 타입}
-  D1 -->|이미지 폴더| IMG[run_image_manifest<br/>이미지 매니페스트 (노드)]
-  D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize<br/>샘플링+요약 (노드)]
-    D1 -->|오류| B[build_context<br/>컨텍스트 확정<br/>]
+    D1 -->|이미지 폴더| IMG[run_image_manifest\n이미지 매니페스트 (노드)]
+    D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize\n샘플링+요약 (노드)]
+    D1 -->|오류| B[build_context\n컨텍스트 확정]
 
     SAS --> B
     IMG --> B
   end
 
   B --> D4{ERROR_CONTEXT?}
-  D4 -->|예| FE[friendly_error<br/>에러를 한글로 요약]
-  D4 -->|아니오| C[chatbot<br/>요구사항 정리 + 툴 선택]
-  C --> TP[run_planned_tools<br/>선택된 툴 실행/전수 조사]
-  TP --> TOOLS[툴 콜 목록<br/>collect_unique_values / mapping_coverage_report / collect_rare_values / detect_parseability / detect_encoding / column_profile]
-  TP --> G[generate<br/>전처리 스크립트 생성]
+  D4 -->|예| FE[friendly_error\n에러를 한글로 요약]
+  D4 -->|아니오| C[chatbot\n요구사항 정리 + 툴 선택]
+  C --> TP[run_planned_tools\n선택된 툴 실행/전수 조사]
+  TP --> TOOLS["툴 콜 목록\ncollect_unique_values\nmapping_coverage_report\ncollect_rare_values\ndetect_parseability\ndetect_encoding\ncolumn_profile"]
+  TP --> G[generate\n전처리 스크립트 생성]
 
-  G --> E[code_check<br/>코드 실행]
+  G --> E[code_check\n코드 실행]
   E --> D5{실행 성공?}
-  D5 -->|성공| V[validate<br/>__validation_report__ 검증]
+  D5 -->|성공| V[validate\n__validation_report__ 검증]
   D5 -->|실패| D{max_iterations?}
 
   V --> D6{검증 통과?}
   D6 -->|통과| END
   D6 -->|실패| D
 
-  D -->|남음| RF[reflect<br/>오류 기반 수정]
-  D -->|초과| FE[friendly_error<br/>최종 실패 요약]
+  D -->|남음| RF[reflect\n오류 기반 수정]
+  D -->|초과| FE[friendly_error\n최종 실패 요약]
 
   RF --> E
   FE --> END

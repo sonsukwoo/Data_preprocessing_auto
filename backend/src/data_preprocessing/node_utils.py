@@ -482,8 +482,36 @@ def _toolcall_apply_defaults(
         args["path"] = default_path
     elif default_path and isinstance(args.get("path"), str):
         raw_path = str(args.get("path", "")).strip()
-        if raw_path in {"data_path", "<data_path>", "path", "<path>"}:
+        if not raw_path:
             args["path"] = default_path
+        else:
+            lowered = raw_path.lower()
+            if raw_path in {"data_path", "<data_path>", "path", "<path>"} or any(
+                token in lowered
+                for token in (
+                    "path/to",
+                    "your/data",
+                    "your/file",
+                    "example",
+                    "sample",
+                    "<data_path>",
+                    "<path>",
+                    "{path}",
+                    "{data_path}",
+                )
+            ):
+                args["path"] = default_path
+            else:
+                try:
+                    candidate = _resolve_path(raw_path)
+                except Exception:
+                    candidate = None
+                if candidate is not None and not candidate.exists():
+                    try:
+                        if _resolve_path(default_path).exists():
+                            args["path"] = default_path
+                    except Exception:
+                        args["path"] = default_path
     if name in timeout_only_tools:
         args["time_limit_sec"] = 60
         for key in limit_keys_by_tool.get(name, []):
@@ -632,8 +660,12 @@ def _validation_error_response(
     stdout_tail: str | None = None,
     extra_trace: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    moved: list[str] = []
     if execution_workdir:
-        cleanup_dir(execution_workdir)
+        try:
+            moved = promote_staged_outputs(execution_workdir)
+        finally:
+            cleanup_dir(execution_workdir)
     trace_payload: dict[str, object] = {
         "ts": now_iso(),
         "node": "validate",
@@ -643,6 +675,8 @@ def _validation_error_response(
         "validation_report": report,
         "last_message": last_message or msg,
     }
+    if moved:
+        trace_payload["output_files"] = moved
     if stdout_tail is not None:
         trace_payload["execution_stdout_tail"] = stdout_tail
     if extra_trace:
@@ -651,6 +685,7 @@ def _validation_error_response(
         "messages": [("user", msg)],
         "error": "yes",
         "phase": "validating",
+        "output_files": moved,
         **append_trace(state, trace_payload),
     }
 
@@ -1054,6 +1089,8 @@ def _validation_collect_metric_flags(
         if num is None:
             continue
         key = str(k).lower()
+        if any(tok in key for tok in ("before", "after", "raw", "input", "original", "orig")):
+            continue
         if any(tok in key for tok in ("missing", "empty", "placeholder", "fallback")) and num > 0:
             col = None
             for suffix in ("_missing", "_empty", "_placeholder", "_fallback"):
@@ -1075,4 +1112,3 @@ def _validation_collect_metric_flags(
                     continue
             metric_flags.append(f"{k}={num}")
     return metric_flags
-

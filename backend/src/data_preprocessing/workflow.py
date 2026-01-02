@@ -525,7 +525,20 @@ def validate(state: State):
 
     # 방어적 처리: metrics가 결측/placeholder/fallback 사용을 시사하면 ok=True를 그대로 신뢰하지 않는다.
     metrics = report.get("metrics")
-    if ok is True and not isinstance(metrics, dict):
+    strict_validation = _validation_coerce_bool(
+        report.get("strict_validation")
+        or report.get("validation_strict")
+        or report.get("enforce_metrics")
+    )
+    if strict_validation is None and isinstance(metrics, dict):
+        strict_validation = _validation_coerce_bool(
+            metrics.get("strict_validation")
+            or metrics.get("validation_strict")
+            or metrics.get("enforce_metrics")
+        )
+    if strict_validation is None:
+        strict_validation = False
+    if ok is True and not isinstance(metrics, dict) and strict_validation:
         return _validation_fail_missing_metrics(state, report, execution_workdir)
 
     # 결측/placeholder 정책: 기본은 엄격, 명시된 경우만 완화
@@ -551,7 +564,7 @@ def validate(state: State):
 
     # metrics에 "<col>_missing"/"<col>_empty"가 있으면, 대응하는 placeholder/fallback 메트릭도 요구한다.
     # "정보 없음" 같은 placeholder로 미매핑 값을 숨기는 것을 방지한다.
-    if isinstance(metrics, dict):
+    if strict_validation and isinstance(metrics, dict):
         missing_placeholder_metrics = _validation_missing_placeholder_metrics(
             metrics,
             allowed_missing_cols,
@@ -566,7 +579,7 @@ def validate(state: State):
                 missing_placeholder_metrics,
             )
 
-        # 매핑 누락 감지: *_missing_mapping(_count) 지표가 있으면 반드시 실패 처리
+        # 매핑 누락 감지: *_missing_mapping(_count) 지표가 있으면 반드시 실패 처리(엄격 모드)
         missing_mapping_count, missing_mapping = _validation_extract_missing_mapping(metrics)
         if missing_mapping_count is not None or missing_mapping:
             return _validation_fail_missing_mapping(
@@ -578,7 +591,7 @@ def validate(state: State):
             )
 
     metric_flags: list[str] = []
-    if isinstance(metrics, dict):
+    if strict_validation and isinstance(metrics, dict):
         metric_flags = _validation_collect_metric_flags(
             metrics,
             allowed_missing_cols,
@@ -586,7 +599,7 @@ def validate(state: State):
             placeholder_optional,
         )
 
-    if ok is True and not metric_flags:
+    if ok is True and (not strict_validation or not metric_flags):
         return _validation_success_response(state, report, execution_workdir)
 
     # ok=True가 명시되지 않으면 실패로 처리(요구사항 누락(silent miss) 방지)
@@ -703,6 +716,8 @@ def friendly_error(state: State, llm_gpt: ChatOpenAI):
 # =========================
 # 노드 함수 끝
 # =========================
+
+
 
 # =========================
 # 라우터: 조건 분기 함수
