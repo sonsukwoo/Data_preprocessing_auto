@@ -18,11 +18,12 @@ from langgraph.graph import END, START, StateGraph
 # =========================
 # 내부 모듈: 모델/프롬포트
 # =========================
-from .models import CodeBlocks, RequirementsPayload, State
+from .models import CodeBlocks, ReflectPlanPayload, RequirementsPayload, State
 from .prompts import (
     REQUIREMENTS_SYSTEM_PROMPT,
     REQUIREMENTS_USER_TEMPLATE,
     code_gen_prompt,
+    reflect_plan_prompt,
     reflect_prompt,
 )
 
@@ -49,6 +50,7 @@ from .common_utils import (
     extract_last_message_text,
     extract_user_request,
     now_iso,
+    safe_format_json_like,
     diff_generation,
     write_internal_trace_markdown,
 )
@@ -310,6 +312,7 @@ def run_planned_tools(state: State):
     """요구사항에서 선택한 툴을 실행해 컨텍스트를 확장."""
     context = state.get("context") or ""
     planned = state.get("planned_tools") or []
+    existing_reports = state.get("tool_reports") or []
     inspect_info = state.get("inspect_result") or {}
     default_path = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
 
@@ -324,6 +327,16 @@ def run_planned_tools(state: State):
 
     tool_reports: list[dict[str, Any]] = []
     seen: set[str] = set()
+    for rep in existing_reports:
+        if not isinstance(rep, dict):
+            continue
+        name = str(rep.get("name") or "")
+        args = rep.get("args") or {}
+        if not name:
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        seen.add(_toolcall_build_dedup_key(name, args))
 
     timeout_only_tools = {
         "collect_unique_values",
@@ -375,10 +388,12 @@ def run_planned_tools(state: State):
         )
 
     context = _toolcall_format_reports(tool_reports, context)
+    merged_reports = existing_reports + tool_reports if tool_reports else existing_reports
 
     return {
         "context": context,
-        "tool_reports": tool_reports or None,
+        "tool_reports": merged_reports or None,
+        "tool_plan_origin": state.get("tool_plan_origin"),
         "phase": "sampling",
         **append_trace(
             state,
@@ -387,7 +402,7 @@ def run_planned_tools(state: State):
                 "node": "run_planned_tools",
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
-                "tool_reports": tool_reports,
+                "tool_reports": merged_reports,
             },
         ),
     }
@@ -624,22 +639,116 @@ def validate(state: State):
 
 # reflect: 실행 오류를 기반으로 수정 코드 재생성
 def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
-    """에러 발생 시 수정 코드 생성."""
+    """에러 발생 시 수정 코드 생성 또는 추가 툴 계획."""
     error = extract_last_message_text(state.get("messages", []))
-    code_solution = state["generation"]
-    code_solution_str = (
-        f"Imports: {code_solution.imports} \n Code: {code_solution.code}"
-    )
-    prev_generation = {
-        "imports": getattr(code_solution, "imports", ""),
-        "code": getattr(code_solution, "code", ""),
-    }
+    code_solution = state.get("generation")
+    code_solution_str = ""
+    prev_generation = {"imports": "", "code": ""}
+    if code_solution:
+        code_solution_str = f"Imports: {code_solution.imports} \n Code: {code_solution.code}"
+        prev_generation = {
+            "imports": getattr(code_solution, "imports", ""),
+            "code": getattr(code_solution, "code", ""),
+        }
 
-    corrected_code = llm_coder.invoke(
-        reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
+    context = state.get("context", "") or ""
+    requirements_prompt = (state.get("requirements_prompt") or "").strip()
+    reqs = state.get("requirements") or []
+    requirements_list = "\n".join([f"- {r.id}: {r.text}" for r in reqs]) if reqs else ""
+    requirements_text = requirements_prompt or requirements_list or "(none)"
+    tool_reports = state.get("tool_reports") or []
+    tool_reports_text = safe_format_json_like(tool_reports, limit=4000)
+
+    # 이미 추가 툴을 실행한 직후라면 바로 코드 생성으로 강제
+    if state.get("tool_plan_origin") == "reflect":
+        corrected_code = llm_coder.invoke(
+            reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
+        )
+        code_structurer = llm_gpt.with_structured_output(CodeBlocks)
+        reflections = code_structurer.invoke(corrected_code.content)
+        next_generation = {"imports": reflections.imports, "code": reflections.code}
+        diff_text, diff_summary = diff_generation(prev_generation, next_generation)
+
+        messages = [
+            (
+                "assistant",
+                f"Imports: {reflections.imports} \n Code: {reflections.code}",
+            )
+        ]
+
+        return {
+            "generation": reflections,
+            "messages": messages,
+            "iterations": state["iterations"] + 1,
+            "phase": "refactoring",
+            "reflect_action": "generate_code",
+            "tool_plan_origin": None,
+            **append_trace(
+                state,
+                {
+                    "ts": now_iso(),
+                    "node": "reflect",
+                    "phase": "refactoring",
+                    "iterations": int(state.get("iterations", 0) or 0) + 1,
+                    "error_input": error,
+                    "reflect_action": "generate_code",
+                    "generation": {"imports": reflections.imports, "code": reflections.code},
+                    "prev_generation": prev_generation,
+                    "diff_summary": diff_summary,
+                    "diff": diff_text,
+                },
+            ),
+        }
+
+    planner = llm_coder.with_structured_output(ReflectPlanPayload)
+    decision = planner.invoke(
+        reflect_plan_prompt.format_messages(
+            error=error,
+            code_solution=code_solution_str,
+            context=context,
+            requirements=requirements_text,
+            tool_reports=tool_reports_text,
+        )
     )
-    code_structurer = llm_gpt.with_structured_output(CodeBlocks)
-    reflections = code_structurer.invoke(corrected_code.content)
+
+    if decision.action == "plan_tools" and decision.tool_calls:
+        messages = [
+            (
+                "assistant",
+                "추가 정보가 필요하여 툴만 선택했습니다. 툴 실행 후 다시 수정 코드를 생성합니다.",
+            )
+        ]
+        return {
+            "planned_tools": decision.tool_calls,
+            "messages": messages,
+            "iterations": state.get("iterations", 0),
+            "phase": "refactoring",
+            "reflect_action": "plan_tools",
+            "tool_plan_origin": "reflect",
+            **append_trace(
+                state,
+                {
+                    "ts": now_iso(),
+                    "node": "reflect",
+                    "phase": "refactoring",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error_input": error,
+                    "reflect_action": "plan_tools",
+                    "planned_tools": [t.model_dump() for t in (decision.tool_calls or [])],
+                },
+            ),
+        }
+
+    # 코드 생성 (추가 툴 필요 없음)
+    if decision.imports or decision.code:
+        reflections = CodeBlocks(imports=decision.imports or "", code=decision.code or "")
+    else:
+        corrected_code = llm_coder.invoke(
+            reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
+        )
+        code_structurer = llm_gpt.with_structured_output(CodeBlocks)
+        reflections = code_structurer.invoke(corrected_code.content)
+
     next_generation = {"imports": reflections.imports, "code": reflections.code}
     diff_text, diff_summary = diff_generation(prev_generation, next_generation)
 
@@ -655,6 +764,8 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
         "messages": messages,
         "iterations": state["iterations"] + 1,
         "phase": "refactoring",
+        "reflect_action": "generate_code",
+        "tool_plan_origin": None,
         **append_trace(
             state,
             {
@@ -663,6 +774,7 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
                 "phase": "refactoring",
                 "iterations": int(state.get("iterations", 0) or 0) + 1,
                 "error_input": error,
+                "reflect_action": "generate_code",
                 "generation": {"imports": reflections.imports, "code": reflections.code},
                 "prev_generation": prev_generation,
                 "diff_summary": diff_summary,
@@ -741,6 +853,14 @@ def route_after_context(state: State):
         return "friendly_error"
     return "chatbot"
 
+
+# route_after_tools: tool 실행 후 다음 단계 분기
+def route_after_tools(state: State):
+    """reflect에서 추가 툴을 요청한 경우 reflect로 복귀."""
+    if state.get("tool_plan_origin") == "reflect":
+        return "reflect"
+    return "generate"
+
 # decide_to_finish: 실패 시 reflect/최종에러 분기 결정
 def decide_to_finish(state: State, max_iterations: int):
     """실패 시 reflect/최종에러 분기 결정."""
@@ -759,6 +879,14 @@ def route_after_execution(state: State, max_iterations: int):
     if state.get("error") == "no":
         return "validate"
     return decide_to_finish(state, max_iterations=max_iterations)
+
+
+# route_after_reflect: 리플렉트 결과에 따라 분기
+def route_after_reflect(state: State):
+    """reflect가 추가 툴을 요청하면 run_planned_tools로 보낸다."""
+    if state.get("reflect_action") == "plan_tools" and state.get("planned_tools"):
+        return "run_planned_tools"
+    return "code_check"
 # =========================
 # 라우터 끝
 # =========================
@@ -822,8 +950,12 @@ def build_graph(
     # chatbot 이후: 선택된 툴 실행
     graph_builder.add_edge("chatbot", "run_planned_tools")
 
-    # tool 실행 후: 코드 생성
-    graph_builder.add_edge("run_planned_tools", "generate")
+    # tool 실행 후: 일반 흐름은 generate, reflect 추가툴이면 reflect로 복귀
+    graph_builder.add_conditional_edges(
+        "run_planned_tools",
+        route_after_tools,
+        {"generate": "generate", "reflect": "reflect"},
+    )
 
     # generate → code_check
     graph_builder.add_edge("generate", "code_check")
@@ -842,8 +974,12 @@ def build_graph(
         {"end": END, "reflect": "reflect", "friendly_error": "friendly_error"},
     )
 
-    # reflect → code_check
-    graph_builder.add_edge("reflect", "code_check")
+    # reflect → (추가툴 필요 시 run_planned_tools) → reflect → code_check
+    graph_builder.add_conditional_edges(
+        "reflect",
+        route_after_reflect,
+        {"run_planned_tools": "run_planned_tools", "code_check": "code_check"},
+    )
 
     # friendly_error → END
     graph_builder.add_edge("friendly_error", END)
@@ -886,6 +1022,8 @@ def run_request(
         "tool_call_args": None,
         "planned_tools": None,
         "tool_reports": None,
+        "reflect_action": None,
+        "tool_plan_origin": None,
         "inspect_result": None,
         "sample_json": None,
         "summary_context": None,

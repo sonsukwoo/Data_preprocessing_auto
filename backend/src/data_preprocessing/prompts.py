@@ -15,6 +15,7 @@ REQUIREMENTS_SYSTEM_PROMPT = """
 - 출력 형식(예: 시간 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.
 - requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.
 - tool_calls에는 데이터 조사에 필요한 툴을 선택해서 넣으세요. 필요 없으면 빈 리스트로 두세요.
+- tool_calls의 reason은 반드시 한국어로 짧게 작성하세요. 영어/혼합 언어는 금지합니다.
 - 아래 툴 설명서를 참고해, 요구사항과 샘플링된 데이터에 맞는 툴을 스스로 판단해 선택하세요.
 - 키워드 규칙에 의존하지 말고, 툴의 역할/입출력을 이해해 판단하세요.
 - tool_calls는 필요하다면 여러 개를 동시에 선택해도 됩니다.
@@ -151,6 +152,7 @@ reflect_prompt = ChatPromptTemplate.from_messages(
             __main__ 가드, argparse, sys.argv 기반 진입점은 금지합니다.
             마크다운 펜스/헤딩을 포함하지 마세요.
             누락된 파일을 회피하기 위해 샘플 데이터를 생성하지 마세요. 파일이 없으면 명확한 오류로 즉시 실패해야 합니다.
+            __validation_report__ 구조를 절대 삭제/축약하지 마세요. 특히 requirements dict(요구사항별 pass/fail)는 반드시 포함해야 합니다.
             imports + 실행 코드만 반환하고, 추가 설명은 금지합니다."""
         ),
         (
@@ -167,9 +169,55 @@ reflect_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+# =========================
+# Reflection: tool plan or code fix
+# =========================
+reflect_plan_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+            너는 리플렉트 단계에서 아래 둘 중 하나를 선택한다:
+            - action="plan_tools": 추가 전수 조사 툴이 필요할 때만 선택. 이때 tool_calls만 채우고 imports/code는 비워라.
+            - action="generate_code": 추가 툴이 필요 없으면 선택. 이때 imports/code를 채우고 tool_calls는 비워라.
+
+            추가 툴은 이미 수행한 tool_reports와 중복되지 않게 "추가로 필요한 것만" 선택한다.
+            아래는 사용 가능한 툴 설명이다:
+            - collect_unique_values: 특정 컬럼의 고유값 목록/개수를 전수 스캔
+            - mapping_coverage_report: 매핑 키와 데이터 고유값 비교(누락/여분)
+            - collect_rare_values: 특정 컬럼의 희귀값(빈도 낮은 값) 수집
+            - detect_parseability: 컬럼 값 파싱 가능 여부 점검(예: 날짜/숫자)
+            - detect_encoding: 텍스트 파일 인코딩 추정
+            - column_profile: 컬럼 타입/결측/샘플값 프로파일
+
+            tool_calls의 reason은 반드시 한국어로 짧게 작성하라. 영어/혼합 언어 금지.
+            오류가 문법/런타임/실행 실패라면 tool_calls 없이 action="generate_code"를 선택하라.
+            action="generate_code"일 경우 __validation_report__는 반드시 {{ok, issues, metrics, requirements}}를 포함해야 한다.
+            마크다운 펜스/헤딩 금지. 샘플 데이터 생성 금지.
+            """,
+        ),
+        (
+            "user",
+            """
+            --- 오류 메시지 ---
+            {error}
+            --- 기존 코드 ---
+            {code_solution}
+            --- 컨텍스트(샘플링/요약/툴 리포트 포함) ---
+            {context}
+            --- 요구사항 요약 ---
+            {requirements}
+            --- 기존 tool_reports ---
+            {tool_reports}
+            """,
+        ),
+    ]
+)
+
 __all__ = [
     "REQUIREMENTS_SYSTEM_PROMPT",
     "REQUIREMENTS_USER_TEMPLATE",
     "code_gen_prompt",
     "reflect_prompt",
+    "reflect_plan_prompt",
 ]

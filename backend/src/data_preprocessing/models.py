@@ -28,7 +28,7 @@ class ToolCall(BaseModel):
 
     name: str = Field(description="Tool name to call")
     args: ToolCallArgs = Field(default_factory=ToolCallArgs, description="Arguments for the tool")
-    reason: str = Field(default="", description="Why this tool is needed (short)")
+    reason: str = Field(default="", description="툴 선택 이유(짧게, 한국어)")
 
 
 class Requirement(BaseModel):
@@ -53,6 +53,19 @@ class RequirementsPayload(BaseModel):
     )
 
 
+class ReflectPlanPayload(BaseModel):
+    """리플렉트 단계에서 툴 추가 여부/수정 코드 여부를 함께 결정."""
+
+    action: Literal["generate_code", "plan_tools"] = Field(
+        default="generate_code", description="Whether to generate code or plan extra tools."
+    )
+    tool_calls: list[ToolCall] = Field(
+        default_factory=list, description="Additional tool calls if action=plan_tools."
+    )
+    imports: str = Field(default="", description="Imports block (when action=generate_code)")
+    code: str = Field(default="", description="Code block (when action=generate_code)")
+
+
 class CodeBlocks(BaseModel):
     """LLM이 생성한 코드를 구조화해 담는 모델."""
 
@@ -75,6 +88,8 @@ class State(MessagesState):
     requirements_prompt: Optional[str] = None
     planned_tools: Optional[list[ToolCall]] = None
     tool_reports: Optional[list[dict[str, Any]]] = None
+    reflect_action: Optional[str] = None
+    tool_plan_origin: Optional[str] = None
     output_files: Optional[list[str]] = None
     tool_call_name: Optional[str] = None
     tool_call_args: Optional[dict[str, Any]] = None
@@ -89,4 +104,12 @@ class State(MessagesState):
     trace: Optional[list[dict[str, Any]]] = None
 
 
-__all__ = ["ToolCallArgs", "ToolCall", "Requirement", "RequirementsPayload", "CodeBlocks", "State"]
+__all__ = [
+    "ToolCallArgs",
+    "ToolCall",
+    "Requirement",
+    "RequirementsPayload",
+    "ReflectPlanPayload",
+    "CodeBlocks",
+    "State",
+]

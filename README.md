@@ -1,10 +1,18 @@
 # 데이터 전처리 에이전트 (LangGraph + FastAPI) — 데모
 
-자연어로 “이 데이터 전처리해줘”를 입력하면, **LangGraph 기반 에이전트가 데이터(파일/폴더/S3)를 고정 로직으로 검사·샘플링·요약한 뒤 요구사항을 정리하고, 필요 시 전수 조사 도구(LLM 툴콜)를 호출한 다음 전처리 파이썬 스크립트를 생성/실행해 결과 파일을 생성**하는 데모 프로젝트입니다.
+자연어로 “이 데이터 전처리해줘”를 입력하면, **LangGraph 기반 에이전트가 입력 데이터를 검사·샘플링·요약**한 뒤 **요구사항을 구조화**하고, **필요한 전수 조사 도구(LLM 툴콜)를 선택/실행**한 다음 **전처리 파이썬 스크립트를 생성/실행**해 결과 파일을 생성하는 데모 프로젝트입니다.
 
-이 프로젝트는 과거 파인튜닝 프로젝트를 진행할 때,
+이 프로젝트는 과거 파인튜닝 프로젝트를 진행할 때
 **전처리 스크립트 작성 → 패키지 설치 → 오류 수정 → 재실행**을 반복하거나
 원하지 않는 값이 섞여 나오는 문제를 줄이기 위해, 전처리 과정을 자동화하고자 만들었습니다.
+
+핵심 개념을 간단히 정리하면 다음과 같습니다.
+
+- **고정 입력 검사**: 입력 경로/파일 유형을 먼저 판별해 흐름을 안정화합니다.
+- **샘플링 + 요약**: 작은 샘플로 결측/분포/컬럼 타입을 요약해 LLM 판단 품질을 올립니다.
+- **전수 조사(툴콜)**: LLM이 필요한 범위만 효율적으로 스캔하기 위해 알맞는 툴들을 선택하여 스캔합니다.
+- **코드 생성 + 실행**: 요구사항을 만족하는 스크립트를 생성하고 서버에서 실행합니다.
+- **검증/리플렉트**: 실패 시 추가할 툴들이 있는지도 확인하고 자동 수정 루프를 돌려 성공 확률을 높입니다.
 
 
 ---
@@ -65,7 +73,7 @@ docker compose down
 
 ### 3) 모델 선택 (선택)
 
-- **대화 모델**: 요구사항 정리/도구 호출/요약에 사용
+- **분석 모델**: 요구사항 정리/도구 호출/요약에 사용
 - **코드 생성 모델**: 실제 전처리 스크립트 생성에 사용
 - 서버는 허용된 모델만 받으며, 허용 목록 외 모델은 400으로 거부됩니다.
 
@@ -98,12 +106,12 @@ flowchart LR
   N -->|"API proxy"| A["FastAPI backend 8000"]
   A --> G["LangGraph Agent"]
   G -->|"inspect + fixed routing"| T["inspect_input_node"]
-  T -->|"table"| S["run_sample_and_summarize\n(node)"]
-  T -->|"images"| IM["run_image_manifest\n(node)"]
+  T -->|"table"| S["run_sample_and_summarize"]
+  T -->|"images"| IM["run_image_manifest"]
   S --> C["build_context"]
   IM --> C
-  G -->|"LLM toolcalls"| TP["run_planned_tools"]
-  TP --> TOOL["scan tools<br/>collect_unique_values / mapping_coverage_report / collect_rare_values / detect_parseability / detect_encoding / column_profile"]
+  G -->|"tool planning"| TP["run_planned_tools"]
+  TP --> TOOL["scan tools"]
   G -->|"generate code"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
@@ -122,20 +130,21 @@ S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 
 
 ```mermaid
 flowchart TD
-  I[inspect_input_node\n입력 경로 검사] --> C[build_context\n샘플링 및 요약]
-  C --> D{error_context?\n오류 컨텍스트?}
-  D -->|예| X[friendly_error\n친절 오류] --> H[END\n완료]
-  D -->|아니오| B[chatbot\n요구사항 정리 + 툴 선택]
-  B --> T[run_planned_tools\n전수 조사(툴콜)]
-  T --> TS["툴 목록\ncollect_unique_values\nmapping_coverage_report\ncollect_rare_values\ndetect_parseability\ndetect_encoding\ncolumn_profile"]
-  T --> E[generate\n코드 생성]
-  E --> F[code_check\n실행]
-  F --> FE{실행 오류?}
-  FE -->|예| R[reflect\n리플렉트]
-  FE -->|아니오| G{validate\n검증}
-  G -->|통과| H
-  G -->|실패| R
-  R --> F
+  I[inspect_input_node] --> C[build_context]
+  C --> D{error_context}
+  D -->|yes| X[friendly_error] --> H[END]
+  D -->|no| B[chatbot]
+  B --> T[run_planned_tools]
+  T --> E[generate]
+  E --> F[code_check]
+  F --> FE{exec_error}
+  FE -->|yes| R[reflect]
+  FE -->|no| G{validate}
+  G -->|pass| H
+  G -->|fail| R
+  R --> RT{need_more_tools}
+  RT -->|yes| T
+  RT -->|no| F
 ```
 
 <details>
@@ -147,39 +156,42 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  START([START]) --> I0[inspect_input_node\n입력 경로 검사]
+  START([START]) --> I0[inspect_input_node]
 
-  subgraph INPUT["데이터 샘플링 및 요약 파트"]
+  subgraph INPUT[데이터 샘플링 및 요약]
     direction TB
-    I0 --> D1{입력 타입}
-    D1 -->|이미지 폴더| IMG[run_image_manifest\n이미지 매니페스트 (노드)]
-    D1 -->|테이블 파일/폴더| SAS[run_sample_and_summarize\n샘플링+요약 (노드)]
-    D1 -->|오류| B[build_context\n컨텍스트 확정]
+    I0 --> D1{input_type}
+    D1 -->|images| IMG[run_image_manifest]
+    D1 -->|table| SAS[run_sample_and_summarize]
+    D1 -->|error| B[build_context]
 
     SAS --> B
     IMG --> B
   end
 
-  B --> D4{ERROR_CONTEXT?}
-  D4 -->|예| FE[friendly_error\n에러를 한글로 요약]
-  D4 -->|아니오| C[chatbot\n요구사항 정리 + 툴 선택]
-  C --> TP[run_planned_tools\n선택된 툴 실행/전수 조사]
-  TP --> TOOLS["툴 콜 목록\ncollect_unique_values\nmapping_coverage_report\ncollect_rare_values\ndetect_parseability\ndetect_encoding\ncolumn_profile"]
-  TP --> G[generate\n전처리 스크립트 생성]
+  B --> D4{error_context}
+  D4 -->|yes| FE[friendly_error]
+  D4 -->|no| C[chatbot]
+  C --> TP[run_planned_tools]
+  TP --> G[generate]
 
-  G --> E[code_check\n코드 실행]
-  E --> D5{실행 성공?}
-  D5 -->|성공| V[validate\n__validation_report__ 검증]
-  D5 -->|실패| D{max_iterations?}
+  G --> E[code_check]
+  E --> D5{exec_ok}
+  D5 -->|yes| V[validate]
+  D5 -->|no| D{iter_left}
 
-  V --> D6{검증 통과?}
-  D6 -->|통과| END
-  D6 -->|실패| D
+  V --> D6{validate_ok}
+  D6 -->|yes| END
+  D6 -->|no| D
 
-  D -->|남음| RF[reflect\n오류 기반 수정]
-  D -->|초과| FE[friendly_error\n최종 실패 요약]
+  D -->|left| RF[reflect]
+  D -->|exceeded| FE
 
-  RF --> E
+  RF --> RT2{need_more_tools}
+  RT2 -->|yes| TP
+  RT2 -->|no| E
+
+  TP --> RF
   FE --> END
 ```
 
@@ -192,7 +204,7 @@ flowchart TD
 - **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(고정 노드)
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
-  - 툴 목록: `collect_unique_values`, `mapping_coverage_report`, `collect_rare_values`, `detect_parseability`, `detect_encoding`, `column_profile`
+- 툴 목록: `collect_unique_values`, `mapping_coverage_report`, `collect_rare_values`, `detect_parseability`, `detect_encoding`, `column_profile`
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성(중간/최종 오류 공통)
 - **generate**: 전처리 파이썬 스크립트 생성
 - **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
@@ -254,7 +266,7 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 
 ## 모델 선택
 
-- UI에서 **대화 모델 / 코드 생성 모델**을 각각 선택합니다.
+- UI에서 **분석 모델 / 코드 생성 모델**을 각각 선택합니다.
   - 기본값: `gpt-4o-mini` / `gpt-4.1`
 - 서버는 허용된 모델만 받으며, 허용 목록 외 모델은 400으로 거부됩니다.
 
