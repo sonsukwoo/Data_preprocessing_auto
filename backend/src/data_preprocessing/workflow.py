@@ -194,7 +194,7 @@ def run_sample_and_summarize(state: State):
         if not target:
             context_candidate = "ERROR_CONTEXT||MissingInputPath||테이블 경로를 찾지 못했습니다."
         else:
-            sample_json = sample_table(path=target, sample_size=5000)
+            sample_json = sample_table(path=target)
         if isinstance(sample_json, str) and sample_json.startswith("ERROR_CONTEXT||"):
             context_candidate = sample_json
         else:
@@ -343,6 +343,7 @@ def run_planned_tools(state: State):
         "mapping_coverage_report",
         "collect_rare_values",
         "detect_parseability",
+        "detect_encoding",
         "column_profile",
     }
     limit_keys_by_tool = {
@@ -351,6 +352,7 @@ def run_planned_tools(state: State):
         "collect_rare_values": ["max_rows", "max_values_return"],
         "detect_parseability": ["max_rows", "max_samples"],
         "column_profile": ["max_rows", "max_columns", "sample_values_limit"],
+        "detect_encoding": ["max_rows"],
     }
 
     for tool_call in planned:
@@ -378,17 +380,50 @@ def run_planned_tools(state: State):
             except Exception as exc:  # noqa: BLE001
                 output = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
 
+        stats: dict[str, Any] | None = None
+        if isinstance(output, str) and not output.startswith("ERROR_CONTEXT||"):
+            try:
+                payload = json.loads(output)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                stats = {}
+                for key in (
+                    "rows_scanned",
+                    "time_limited",
+                    "row_limited",
+                    "truncated",
+                    "unique_count",
+                    "missing_in_mapping_count",
+                    "extra_mapping_keys_count",
+                    "rare_count",
+                    "sample_size",
+                    "columns_profiled",
+                    "sample_bytes",
+                ):
+                    if key in payload:
+                        stats[key] = payload.get(key)
+                if not stats:
+                    stats = None
+
         tool_reports.append(
             {
                 "name": name,
                 "args": args,
                 "reason": reason,
                 "output": output,
+                "stats": stats,
             }
         )
 
     context = _toolcall_format_reports(tool_reports, context)
     merged_reports = existing_reports + tool_reports if tool_reports else existing_reports
+
+    tool_reports_summary = []
+    for rep in tool_reports:
+        stats = rep.get("stats")
+        if isinstance(stats, dict) and stats:
+            tool_reports_summary.append({"name": rep.get("name"), **stats})
 
     return {
         "context": context,
@@ -403,6 +438,7 @@ def run_planned_tools(state: State):
                 "phase": "sampling",
                 "iterations": int(state.get("iterations", 0) or 0),
                 "tool_reports": merged_reports,
+                "tool_reports_summary": tool_reports_summary,
             },
         ),
     }

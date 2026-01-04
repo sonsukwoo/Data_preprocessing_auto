@@ -866,6 +866,7 @@ def run_stream(body: RunRequest) -> StreamingResponse:
         last_stage: Optional[str] = None
         last_state: Optional[Dict[str, Any]] = None
         last_tool_calls_key: Optional[str] = None
+        reflect_counter = 0
         try:
             yield json.dumps({"type": "stage", "stage": "queued", "detail": "요청 접수"}, ensure_ascii=False) + "\n"
             node_to_stage = {
@@ -892,6 +893,7 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                     if is_start and isinstance(name, str) and name in node_to_stage:
                         stage, detail = node_to_stage[name]
                         if name == "reflect":
+                            reflect_counter += 1
                             # reflect 진입 원인을 stage detail로 표시 (스크립트 오류 vs 검증/요구사항 실패)
                             inp = data.get("input")
                             prev_phase = ""
@@ -914,6 +916,7 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                                 detail = "요구사항 검증 오류 수정"
                             else:
                                 detail = "리팩트 중"
+                            detail = f"리팩트 #{reflect_counter}: {detail}" if detail else f"리팩트 #{reflect_counter}"
                         if stage != last_stage:
                             last_stage = stage
                             yield json.dumps({"type": "stage", "stage": stage, "detail": detail}, ensure_ascii=False) + "\n"

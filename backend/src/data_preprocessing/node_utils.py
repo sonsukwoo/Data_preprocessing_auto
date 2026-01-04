@@ -33,6 +33,8 @@ from .constants import (
     _MISSING_TOP_N,
     _PREVIEW_MAX_COLS,
     _PREVIEW_ROWS,
+    _SUMMARY_SAMPLE_SIZE,
+    _SUMMARY_SAMPLE_SIZE_BY_EXT,
     _SUPPORTED_EXTS,
     _VALUE_REPR_LIMIT,
 )
@@ -350,7 +352,12 @@ def inspect_input(path: str, max_files: int = 50) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def sample_table(path: str, sample_size: int = 5000) -> str:
+def _choose_sample_size(path: Path) -> int:
+    ext = path.suffix.lower()
+    return _SUMMARY_SAMPLE_SIZE_BY_EXT.get(ext, _SUMMARY_SAMPLE_SIZE)
+
+
+def sample_table(path: str, sample_size: int | None = None) -> str:
     p = _resolve_path(path)
 
     if p.is_dir():
@@ -361,6 +368,9 @@ def sample_table(path: str, sample_size: int = 5000) -> str:
         if candidate is None:
             return f"ERROR_CONTEXT||NoSupportedFiles||{p} 아래에서 지원하는 데이터 파일을 찾지 못했습니다."
         p = candidate
+
+    if sample_size is None:
+        sample_size = _choose_sample_size(p)
 
     try:
         df, fmt = _read_table_like(str(p), sample_size=sample_size)
@@ -395,7 +405,27 @@ def summarize_table(sample_json: str) -> str:
         return "ERROR_CONTEXT||InvalidPayload||sample_json['sample']이 list가 아닙니다."
 
     df = pd.DataFrame(sample)
-    head_md, dtypes_md, missing_md, numeric_md, categorical_md = _summarize_dataframe(df)
+    columns = [str(c) for c in df.columns]
+    columns_md = (
+        pd.DataFrame({"column": columns}).to_markdown(index=False) if columns else "(컬럼 없음)"
+    )
+    dtypes_md = (
+        df.dtypes.astype(str)
+        .rename("dtype")
+        .reset_index()
+        .rename(columns={"index": "column"})
+        .to_markdown(index=False)
+    )
+    missing = df.isna().sum()
+    missing = missing[missing > 0].sort_values(ascending=False)
+    if not missing.empty:
+        missing_df = missing.head(_MISSING_TOP_N).reset_index()
+        missing_df.columns = ["column", "missing"]
+        denom = max(len(df), 1)
+        missing_df["missing_rate"] = (missing_df["missing"] / denom).round(6)
+        missing_md = missing_df.to_markdown(index=False)
+    else:
+        missing_md = "(결측치 없음)"
     data_path = payload.get("data_path", "")
     fmt = payload.get("detected_format", "")
     sample_rows = payload.get("sample_rows", len(df))
@@ -404,16 +434,13 @@ def summarize_table(sample_json: str) -> str:
         f"data_path: {data_path}\n"
         f"detected_format: {fmt}\n"
         f"sample_rows: {sample_rows}\n"
-        "head:\n"
-        f"{head_md}\n\n"
+        f"columns: {len(columns)}\n"
+        "columns_list:\n"
+        f"{columns_md}\n\n"
         "dtypes:\n"
         f"{dtypes_md}\n\n"
         f"missing (top {_MISSING_TOP_N}):\n"
-        f"{missing_md}\n\n"
-        "numeric describe:\n"
-        f"{numeric_md}\n\n"
-        f"categorical/examples (top {_CATEGORICAL_TOP_COLS} cols):\n"
-        f"{categorical_md}\n"
+        f"{missing_md}\n"
     )
 
 
@@ -515,7 +542,9 @@ def _toolcall_apply_defaults(
     if name in timeout_only_tools:
         args["time_limit_sec"] = 60
         for key in limit_keys_by_tool.get(name, []):
-            args[key] = None
+            args.pop(key, None)
+    # Drop None/empty placeholders to keep tool args clean.
+    args = {k: v for k, v in args.items() if v is not None}
     return args
 
 
@@ -886,10 +915,12 @@ def _validation_success_response(
         ),
     }
 
-
 def _validation_coerce_bool(value: object) -> bool | None:
     if isinstance(value, bool):
         return value
+    # numpy.bool_ 등 bool 유사 타입 지원
+    if type(value).__name__ in {"bool_", "bool8"}:
+        return bool(value)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0
     if isinstance(value, str):

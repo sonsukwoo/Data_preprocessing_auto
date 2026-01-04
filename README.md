@@ -110,9 +110,10 @@ flowchart LR
   T -->|"images"| IM["run_image_manifest"]
   S --> C["build_context"]
   IM --> C
-  G -->|"tool planning"| TP["run_planned_tools"]
+  G -->|"tool planning (chatbot/reflect)"| TP["run_planned_tools"]
   TP --> TOOL["scan tools"]
-  G -->|"generate code"| P["Python script"]
+  TP -->|"tool_reports"| G
+  G -->|"generate code (incl. reflect fixes)"| P["Python script"]
   P -->|"write outputs"| O["backend outputs"]
   A -->|"downloads + preview"| U
   A -->|"presign + optional download"| S3["S3 bucket"]
@@ -124,7 +125,8 @@ S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 
 ### LangGraph 처리 흐름(핵심)
 
 에이전트는 “입력 검사 → 데이터 샘플링/요약 → 요구사항 정리 + 툴 선택(LLM) → 선택된 툴로 전수 조사 → 코드 생성 → 실행 → 검증”을 수행하고,
-실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.
+실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.  
+이때 `reflect`가 추가 툴이 필요하다고 판단하면 `run_planned_tools`로 가서 툴을 실행한 뒤 **다시 `reflect`로 복귀**해 수정 코드를 생성합니다.
 
 아래는 **축약 버전(입력/샘플링 파트 요약)** 입니다.
 
@@ -145,6 +147,7 @@ flowchart TD
   R --> RT{need_more_tools}
   RT -->|yes| T
   RT -->|no| F
+  T -->|tool_plan_origin=reflect| R
 ```
 
 <details>
@@ -191,7 +194,7 @@ flowchart TD
   RT2 -->|yes| TP
   RT2 -->|no| E
 
-  TP --> RF
+  TP -->|tool_plan_origin=reflect| RF
   FE --> END
 ```
 
@@ -200,7 +203,7 @@ flowchart TD
 ### 노드별 역할 요약
 - **chatbot**: LLM이 요청 분석, 요구사항 정리, 필요한 툴 선택
 - **inspect_input_node**: 입력 경로 검사 및 포맷/타입 판별
-- **run_sample_and_summarize**: 테이블 샘플링 및 요약(결측/분포/예시) 생성(고정 노드)
+- **run_sample_and_summarize**: 테이블 샘플링 및 최소 요약(컬럼/타입/결측) 생성(고정 노드)
 - **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(고정 노드)
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가

@@ -18,6 +18,17 @@ _EXT_PRIORITY = {
 _PREVIEW_ROWS = 5
 _PREVIEW_MAX_COLS = 20
 _MISSING_TOP_N = 20
+_SUMMARY_SAMPLE_SIZE = 100
+_SUMMARY_SAMPLE_SIZE_BY_EXT = {
+    ".csv": 30,
+    ".tsv": 30,
+    ".json": 300,
+    ".parquet": 100,
+    ".arrow": 100,
+    ".feather": 100,
+    ".xlsx": 100,
+    ".xls": 100,
+}
 _CATEGORICAL_TOP_COLS = 20
 _CATEGORICAL_EXAMPLE_ROWS = 3
 _VALUE_REPR_LIMIT = 200

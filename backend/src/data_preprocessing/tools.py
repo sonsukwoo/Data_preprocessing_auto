@@ -546,8 +546,8 @@ def _summarize_dataframe(df: pd.DataFrame) -> tuple[str, str, str, str, str]:
 def collect_unique_values(
     path: str,
     column: str,
-    max_unique: int | None = 5000,
-    max_values_return: int | None = _SCAN_MAX_RETURN,
+    max_unique: int | None = None,
+    max_values_return: int | None = None,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -624,8 +624,8 @@ def mapping_coverage_report(
     path: str,
     column: str,
     mapping_keys: Sequence[str] | None = None,
-    max_unique: int | None = 5000,
-    max_values_return: int | None = _SCAN_MAX_RETURN,
+    max_unique: int | None = None,
+    max_values_return: int | None = None,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -716,7 +716,7 @@ def collect_rare_values(
     path: str,
     column: str,
     rare_threshold: int = 3,
-    max_values_return: int | None = _SCAN_MAX_RETURN,
+    max_values_return: int | None = None,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -789,7 +789,7 @@ def detect_parseability(
     path: str,
     column: str,
     parsers: Sequence[str] | None = None,
-    max_samples: int | None = 2000,
+    max_samples: int | None = None,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     max_rows: int | None = None,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
@@ -882,7 +882,12 @@ def detect_parseability(
 
 # 툴: 인코딩 추정
 @tool
-def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
+def detect_encoding(
+    path: str,
+    time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
+    sample_bytes: int | None = None,
+    chunk_size: int = 1_048_576,
+) -> str:
     """텍스트 파일의 인코딩을 간단히 추정."""
 
     try:
@@ -894,7 +899,28 @@ def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
     if ext not in {".csv", ".tsv", ".json"}:
         return f"ERROR_CONTEXT||NotApplicable||{ext} 파일에는 인코딩 추정이 필요 없습니다."
 
-    raw = target.read_bytes()[:sample_bytes]
+    start = time.time()
+    raw = bytearray()
+    time_limited = False
+    target_bytes = None
+    if isinstance(sample_bytes, (int, float)) and not isinstance(sample_bytes, bool):
+        target_bytes = int(sample_bytes)
+        if target_bytes <= 0:
+            target_bytes = None
+        elif target_bytes < 10_000:
+            target_bytes = 10_000
+    with target.open("rb") as f:
+        while True:
+            if target_bytes is not None and len(raw) >= target_bytes:
+                raw = raw[:target_bytes]
+                break
+            if time_limit_sec and (time.time() - start) > time_limit_sec:
+                time_limited = True
+                break
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            raw.extend(chunk)
     candidates = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "latin-1"]
     guessed = None
     for enc in candidates:
@@ -911,6 +937,7 @@ def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
         "sample_bytes": len(raw),
         "encoding_guess": guessed or "unknown",
         "candidates": candidates,
+        "time_limited": bool(time_limited),
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -920,11 +947,11 @@ def detect_encoding(path: str, sample_bytes: int = 100_000) -> str:
 def column_profile(
     path: str,
     columns: Sequence[str] | None = None,
-    max_columns: int | None = 50,
+    max_columns: int | None = None,
     max_rows: int | None = None,
     time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
     chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
-    sample_values_limit: int | None = 5,
+    sample_values_limit: int | None = None,
 ) -> str:
     """컬럼별 타입/결측률/샘플값을 전수 스캔으로 요약."""
 

@@ -21,7 +21,8 @@ REQUIREMENTS_SYSTEM_PROMPT = """
 - tool_calls는 필요하다면 여러 개를 동시에 선택해도 됩니다.
 - 서로 다른 조사 목적이 있으면 2~3개까지 병행 선택하세요.
 - tool_calls를 비우는 경우는 데이터 조사가 불필요하다고 확신되는 경우로 제한하세요.
-- tool_calls의 args에는 column(필요 시), mapping_keys(매핑 키 목록), max_rows/time_limit_sec 같은 제한 옵션을 포함할 수 있습니다.
+- tool_calls의 args에는 필요한 필수 인자만 포함하세요(예: path, column, mapping_keys, parsers).
+- max_rows/time_limit_sec/max_unique/max_values_return/max_samples/max_columns/sample_values_limit/rare_threshold 같은 제한 옵션은 넣지 마세요. 기본값(타임아웃 60초)만 사용합니다.
 
 툴 설명서:
 - collect_unique_values: 특정 컬럼의 고유값을 전수 스캔으로 수집해 매핑/치환/분류에 활용.
@@ -191,6 +192,7 @@ reflect_plan_prompt = ChatPromptTemplate.from_messages(
             - column_profile: 컬럼 타입/결측/샘플값 프로파일
 
             tool_calls의 reason은 반드시 한국어로 짧게 작성하라. 영어/혼합 언어 금지.
+            tool_calls의 args에는 필요한 필수 인자만 포함하고, 제한 옵션(max_* / time_limit_sec / max_rows / sample_* 등)은 넣지 마라.
             오류가 문법/런타임/실행 실패라면 tool_calls 없이 action="generate_code"를 선택하라.
             action="generate_code"일 경우 __validation_report__는 반드시 {{ok, issues, metrics, requirements}}를 포함해야 한다.
             마크다운 펜스/헤딩 금지. 샘플 데이터 생성 금지.
