@@ -37,6 +37,8 @@ from .tools import (
     detect_parseability,
     detect_encoding,
     mapping_coverage_report,
+    value_counts_topk,
+    summary_stats,
 )
 
 # =========================
@@ -77,6 +79,7 @@ from .node_utils import (
     _validation_extract_missing_mapping,
     _validation_extract_policy,
     _validation_extract_requirements,
+    _validation_normalize_requirements,
     _validation_fail_missing_mapping,
     _validation_fail_missing_metrics,
     _validation_fail_missing_ok_issues,
@@ -253,6 +256,8 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
     user_req = state.get("user_request") or extract_user_request(state.get("messages", []))
     context = state.get("context") or ""
     messages = list(state.get("messages", []) or [])
+    inspect_info = state.get("inspect_result") or {}
+    default_path = inspect_info.get("candidate_file") or inspect_info.get("input_path") or ""
 
     reqs = []
     requirements_prompt = ""
@@ -282,6 +287,35 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
     except Exception as exc:  # noqa: BLE001
         reqs_error = f"{type(exc).__name__}: {exc}"
 
+    timeout_only_tools = {
+        "collect_unique_values",
+        "mapping_coverage_report",
+        "collect_rare_values",
+        "detect_parseability",
+        "detect_encoding",
+        "column_profile",
+        "value_counts_topk",
+        "summary_stats",
+    }
+    allowed_keys_by_tool = {
+        "collect_unique_values": {"path", "column", "time_limit_sec"},
+        "mapping_coverage_report": {"path", "column", "mapping_keys", "time_limit_sec"},
+        "collect_rare_values": {"path", "column", "time_limit_sec"},
+        "detect_parseability": {"path", "column", "parsers", "time_limit_sec"},
+        "detect_encoding": {"path", "time_limit_sec"},
+        "column_profile": {"path", "columns", "time_limit_sec"},
+        "value_counts_topk": {"path", "column", "top_k", "time_limit_sec"},
+        "summary_stats": {"path", "column", "columns", "time_limit_sec"},
+    }
+    serialized_tools: list[dict[str, Any]] = []
+    for item in (planned_tools or []):
+        if hasattr(item, "model_dump"):
+            serialized_tools.append(item.model_dump())
+        elif isinstance(item, dict):
+            serialized_tools.append(dict(item))
+        else:
+            serialized_tools.append({"name": str(item)})
+
     return {
         "messages": messages,
         "user_request": user_req,
@@ -299,8 +333,8 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
                 "user_request": user_req,
                 "requirements": [r.model_dump() for r in reqs],
                 "requirements_prompt": requirements_prompt or None,
-                "planned_tools": [t.model_dump() for t in (planned_tools or [])],
-                "tool_calls": [t.model_dump() for t in (planned_tools or [])],
+                "planned_tools": serialized_tools,
+                "tool_calls": serialized_tools,
                 "requirements_error": reqs_error,
             },
         ),
@@ -323,6 +357,8 @@ def run_planned_tools(state: State):
         "detect_parseability": detect_parseability,
         "detect_encoding": detect_encoding,
         "column_profile": column_profile,
+        "value_counts_topk": value_counts_topk,
+        "summary_stats": summary_stats,
     }
 
     tool_reports: list[dict[str, Any]] = []
@@ -345,14 +381,18 @@ def run_planned_tools(state: State):
         "detect_parseability",
         "detect_encoding",
         "column_profile",
+        "value_counts_topk",
+        "summary_stats",
     }
-    limit_keys_by_tool = {
-        "collect_unique_values": ["max_rows", "max_unique", "max_values_return"],
-        "mapping_coverage_report": ["max_rows", "max_unique", "max_values_return"],
-        "collect_rare_values": ["max_rows", "max_values_return"],
-        "detect_parseability": ["max_rows", "max_samples"],
-        "column_profile": ["max_rows", "max_columns", "sample_values_limit"],
-        "detect_encoding": ["max_rows"],
+    allowed_keys_by_tool = {
+        "collect_unique_values": {"path", "column", "time_limit_sec"},
+        "mapping_coverage_report": {"path", "column", "mapping_keys", "time_limit_sec"},
+        "collect_rare_values": {"path", "column", "time_limit_sec"},
+        "detect_parseability": {"path", "column", "parsers", "time_limit_sec"},
+        "detect_encoding": {"path", "time_limit_sec"},
+        "column_profile": {"path", "columns", "time_limit_sec"},
+        "value_counts_topk": {"path", "column", "top_k", "time_limit_sec"},
+        "summary_stats": {"path", "column", "columns", "time_limit_sec"},
     }
 
     for tool_call in planned:
@@ -364,7 +404,7 @@ def run_planned_tools(state: State):
             args,
             default_path,
             timeout_only_tools,
-            limit_keys_by_tool,
+            allowed_keys_by_tool,
         )
         key = _toolcall_build_dedup_key(name, args)
         if key in seen:
@@ -602,6 +642,10 @@ def validate(state: State):
         report_reqs = _validation_extract_requirements(report, metrics)
         if report_reqs is None:
             return _validation_fail_missing_requirements(state, report, execution_workdir, reqs)
+        report_reqs = _validation_normalize_requirements(report_reqs)
+        report["requirements"] = report_reqs
+        if isinstance(metrics, dict) and isinstance(metrics.get("requirements"), dict):
+            metrics["requirements"] = report_reqs
         missing_ids, failed_ids = _validation_eval_requirements(reqs, report_reqs)
         if missing_ids or failed_ids:
             return _validation_fail_requirements(

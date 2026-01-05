@@ -910,9 +910,13 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                                     else:
                                         last_msg = str(m)
 
-                            if prev_phase == "executing" or "failed during execution" in last_msg.lower():
+                            lower_msg = last_msg.lower()
+                            if not prev_phase and last_stage in {"executing", "validating"}:
+                                prev_phase = last_stage
+
+                            if prev_phase == "executing" or "failed during execution" in lower_msg:
                                 detail = "스크립트 오류 수정"
-                            elif prev_phase == "validating" or "validation failed" in last_msg.lower():
+                            elif prev_phase == "validating" or "validation failed" in lower_msg or "requirements" in lower_msg:
                                 detail = "요구사항 검증 오류 수정"
                             else:
                                 detail = "리팩트 중"

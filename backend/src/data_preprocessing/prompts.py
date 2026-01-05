@@ -12,7 +12,7 @@ REQUIREMENTS_SYSTEM_PROMPT = """
 - 중복은 제거하고 최대 10개만 포함하세요.
 - 숫자/범위/시간/형식 조건은 절대 축약하거나 변경하지 마세요.
 - 금지/제외/예외/형식 지정 문장은 반드시 개별 요구사항으로 포함하세요.
-- 출력 형식(예: 시간 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.
+- 출력 형식(예: 특정 포맷)과 '수정하지 말 것/생략 금지' 같은 부정 조건을 누락하지 마세요.
 - requirements_prompt는 코드 생성에 바로 사용할 수 있도록 간결하게 요약하세요.
 - tool_calls에는 데이터 조사에 필요한 툴을 선택해서 넣으세요. 필요 없으면 빈 리스트로 두세요.
 - tool_calls의 reason은 반드시 한국어로 짧게 작성하세요. 영어/혼합 언어는 금지합니다.
@@ -21,16 +21,18 @@ REQUIREMENTS_SYSTEM_PROMPT = """
 - tool_calls는 필요하다면 여러 개를 동시에 선택해도 됩니다.
 - 서로 다른 조사 목적이 있으면 2~3개까지 병행 선택하세요.
 - tool_calls를 비우는 경우는 데이터 조사가 불필요하다고 확신되는 경우로 제한하세요.
-- tool_calls의 args에는 필요한 필수 인자만 포함하세요(예: path, column, mapping_keys, parsers).
-- max_rows/time_limit_sec/max_unique/max_values_return/max_samples/max_columns/sample_values_limit/rare_threshold 같은 제한 옵션은 넣지 마세요. 기본값(타임아웃 60초)만 사용합니다.
+- tool_calls의 args에는 필요한 필수 인자만 포함하세요(예: path, column, columns, mapping_keys, parsers, top_k).
+- 제한 옵션은 넣지 마세요. 필수 인자만 포함하세요.
 
-툴 설명서:
-- collect_unique_values: 특정 컬럼의 고유값을 전수 스캔으로 수집해 매핑/치환/분류에 활용.
-- collect_rare_values: 특정 컬럼의 희귀값(빈도 낮은 값)을 전수 스캔으로 수집해 이상치/누락 점검에 활용.
-- mapping_coverage_report: 매핑 키와 실제 고유값을 비교해 누락/초과를 보고.
-- detect_parseability: 특정 컬럼이 datetime/숫자/불리언 등으로 파싱 가능한지 성공률을 점검.
-- detect_encoding: 텍스트 파일 인코딩을 추정.
-- column_profile: 컬럼별 dtype/결측률/샘플값을 요약.
+툴 설명서(설명 + 언제 사용):
+- collect_unique_values: 특정 컬럼의 고유값을 전수 스캔으로 수집. 매핑/치환/분류 키가 필요할 때 사용.
+- collect_rare_values: 특정 컬럼의 희귀값(빈도 낮은 값)을 전수 스캔으로 수집. 이상치/희귀값 점검이 필요할 때 사용.
+- mapping_coverage_report: 매핑 키와 실제 고유값을 비교해 누락/초과를 보고. 매핑 테이블 검증이 필요할 때 사용.
+- value_counts_topk: 특정 컬럼의 상위 빈도값 Top-K/비율을 전수 스캔으로 계산. 최빈값/분포 요약이 필요할 때 사용.
+- summary_stats: 수치형 컬럼의 평균/중앙값/표준편차/분위수 등을 전수 스캔으로 계산. 수치 통계 요약이 필요할 때 사용.
+- detect_parseability: 특정 컬럼이 datetime/숫자/불리언 등으로 파싱 가능한지 성공률을 점검. 타입 추정이 필요할 때 사용.
+- detect_encoding: 텍스트 파일 인코딩을 추정. 문자 깨짐/디코딩 오류가 의심될 때 사용.
+- column_profile: 컬럼별 dtype/결측률/샘플값을 요약. 컬럼 스키마/결측 요약이 필요할 때 사용.
 - 출력은 지정된 스키마에 맞는 JSON만 반환하세요.
 """
 
@@ -187,12 +189,14 @@ reflect_plan_prompt = ChatPromptTemplate.from_messages(
             - collect_unique_values: 특정 컬럼의 고유값 목록/개수를 전수 스캔
             - mapping_coverage_report: 매핑 키와 데이터 고유값 비교(누락/여분)
             - collect_rare_values: 특정 컬럼의 희귀값(빈도 낮은 값) 수집
+            - value_counts_topk: 특정 컬럼의 상위 빈도값/비율 요약
             - detect_parseability: 컬럼 값 파싱 가능 여부 점검(예: 날짜/숫자)
             - detect_encoding: 텍스트 파일 인코딩 추정
             - column_profile: 컬럼 타입/결측/샘플값 프로파일
+            - summary_stats: 수치형 통계(평균/중앙값/표준편차/분위수) 요약
 
             tool_calls의 reason은 반드시 한국어로 짧게 작성하라. 영어/혼합 언어 금지.
-            tool_calls의 args에는 필요한 필수 인자만 포함하고, 제한 옵션(max_* / time_limit_sec / max_rows / sample_* 등)은 넣지 마라.
+            tool_calls의 args에는 필요한 필수 인자만 포함하고, 제한 옵션은 넣지 마라.
             오류가 문법/런타임/실행 실패라면 tool_calls 없이 action="generate_code"를 선택하라.
             action="generate_code"일 경우 __validation_report__는 반드시 {{ok, issues, metrics, requirements}}를 포함해야 한다.
             마크다운 펜스/헤딩 금지. 샘플 데이터 생성 금지.

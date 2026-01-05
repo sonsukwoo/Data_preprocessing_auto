@@ -4,6 +4,8 @@ import csv
 import json
 import pathlib
 import time
+import math
+import random
 from collections import Counter
 from collections.abc import Iterable
 from typing import Any, Sequence
@@ -35,6 +37,7 @@ from .constants import (
 _SCAN_DEFAULT_CHUNKSIZE = 100_000
 _SCAN_TIME_LIMIT_SEC = 60
 _SCAN_MAX_RETURN = 200
+_SUMMARY_STATS_SAMPLE_SIZE = 20_000
 
 
 # =========================
@@ -783,6 +786,258 @@ def collect_rare_values(
     return json.dumps(payload, ensure_ascii=False)
 
 
+# 툴: 상위 빈도값 Top-K
+@tool
+def value_counts_topk(
+    path: str,
+    column: str,
+    top_k: int = 20,
+    time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
+    chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
+) -> str:
+    """특정 컬럼의 상위 빈도값 Top-K와 비율을 전수 스캔으로 계산."""
+
+    try:
+        target = _resolve_scan_target(path)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    if not column:
+        return "ERROR_CONTEXT||InvalidArgs||column 인자가 필요합니다."
+
+    try:
+        top_k = int(top_k)
+    except Exception:
+        top_k = 20
+    if top_k <= 0:
+        top_k = 20
+
+    start = time.time()
+    rows_scanned = 0
+    time_limited = False
+    counts: Counter[str] = Counter()
+    total_nonnull = 0
+
+    try:
+        iterable, fmt = _get_table_iterator(target, usecols=None, chunksize=chunksize)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    col_norm = _normalize_column_name(column)
+    found = False
+
+    for chunk in iterable:
+        if time_limit_sec and (time.time() - start) > time_limit_sec:
+            time_limited = True
+            break
+        rows_scanned += len(chunk)
+        _sanitize_columns(chunk)
+        if col_norm not in chunk.columns:
+            if not found:
+                return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
+            continue
+        found = True
+        series = chunk[col_norm]
+        nonnull = series.dropna()
+        total_nonnull += int(nonnull.shape[0])
+        if not nonnull.empty:
+            values = nonnull.map(_safe_repr)
+            counts.update(values.value_counts().to_dict())
+
+    if not found:
+        return f"ERROR_CONTEXT||MissingColumn||{column} 컬럼을 찾지 못했습니다."
+
+    top_items = counts.most_common(top_k)
+    topk = []
+    for val, cnt in top_items:
+        ratio = (cnt / total_nonnull) if total_nonnull else 0.0
+        topk.append({"value": val, "count": int(cnt), "ratio": round(float(ratio), 6)})
+
+    payload = {
+        "data_path": str(target),
+        "detected_format": fmt,
+        "column": column,
+        "normalized_column": col_norm,
+        "rows_scanned": rows_scanned,
+        "top_k": top_k,
+        "total_nonnull": total_nonnull,
+        "top_values": topk,
+        "time_limited": bool(time_limited),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+# 툴: 수치형 통계 요약
+@tool
+def summary_stats(
+    path: str,
+    columns: Sequence[str] | None = None,
+    column: str | None = None,
+    time_limit_sec: int = _SCAN_TIME_LIMIT_SEC,
+    chunksize: int = _SCAN_DEFAULT_CHUNKSIZE,
+) -> str:
+    """수치형 컬럼의 요약 통계(평균/중앙값/표준편차/분위수)를 전수 스캔으로 계산."""
+
+    try:
+        target = _resolve_scan_target(path)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    if column and not columns:
+        columns = [column]
+
+    start = time.time()
+    rows_scanned = 0
+    time_limited = False
+
+    try:
+        iterable, fmt = _get_table_iterator(target, usecols=None, chunksize=chunksize)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+
+    stats: dict[str, dict[str, Any]] = {}
+    target_cols: list[str] | None = None
+    normalized_columns = [_normalize_column_name(c) for c in columns] if columns else None
+
+    for chunk in iterable:
+        if time_limit_sec and (time.time() - start) > time_limit_sec:
+            time_limited = True
+            break
+        rows_scanned += len(chunk)
+        _sanitize_columns(chunk)
+
+        if target_cols is None:
+            if normalized_columns:
+                missing = [c for c in normalized_columns if c not in chunk.columns]
+                if missing:
+                    return f"ERROR_CONTEXT||MissingColumn||{missing} 컬럼을 찾지 못했습니다."
+                target_cols = list(normalized_columns)
+            else:
+                target_cols = list(chunk.select_dtypes(include="number").columns)
+
+        for col in target_cols:
+            if col not in chunk.columns:
+                continue
+            s_raw = chunk[col]
+            s = s_raw if pd.api.types.is_numeric_dtype(s_raw) else pd.to_numeric(s_raw, errors="coerce")
+            missing = int(s.isna().sum())
+            values = s.dropna().astype(float)
+            if values.empty:
+                info = stats.setdefault(
+                    col,
+                    {
+                        "count": 0,
+                        "missing": 0,
+                        "mean": 0.0,
+                        "m2": 0.0,
+                        "min": None,
+                        "max": None,
+                        "samples": [],
+                        "seen": 0,
+                    },
+                )
+                info["missing"] += missing
+                continue
+
+            n = int(values.shape[0])
+            mean = float(values.mean())
+            var = float(values.var(ddof=0)) if n > 0 else 0.0
+            m2 = var * n
+            vmin = float(values.min())
+            vmax = float(values.max())
+
+            info = stats.setdefault(
+                col,
+                {
+                    "count": 0,
+                    "missing": 0,
+                    "mean": 0.0,
+                    "m2": 0.0,
+                    "min": None,
+                    "max": None,
+                    "samples": [],
+                    "seen": 0,
+                },
+            )
+            prev_n = info["count"]
+            prev_mean = info["mean"]
+            prev_m2 = info["m2"]
+            if prev_n == 0:
+                new_mean = mean
+                new_m2 = m2
+            else:
+                delta = mean - prev_mean
+                total_n = prev_n + n
+                new_mean = prev_mean + delta * n / total_n
+                new_m2 = prev_m2 + m2 + (delta * delta) * prev_n * n / total_n
+            info["count"] = prev_n + n
+            info["missing"] += missing
+            info["mean"] = new_mean
+            info["m2"] = new_m2
+            info["min"] = vmin if info["min"] is None else min(info["min"], vmin)
+            info["max"] = vmax if info["max"] is None else max(info["max"], vmax)
+
+            samples = info["samples"]
+            seen = info["seen"]
+            for val in values.tolist():
+                seen += 1
+                if len(samples) < _SUMMARY_STATS_SAMPLE_SIZE:
+                    samples.append(val)
+                else:
+                    j = random.randint(0, seen - 1)
+                    if j < _SUMMARY_STATS_SAMPLE_SIZE:
+                        samples[j] = val
+            info["seen"] = seen
+
+    if not stats:
+        return "ERROR_CONTEXT||EmptyData||수치형 컬럼이 없습니다."
+
+    summaries = []
+    for col, info in stats.items():
+        count = int(info["count"])
+        missing = int(info["missing"])
+        mean = float(info["mean"]) if count else None
+        std = None
+        if count > 1:
+            std = math.sqrt(info["m2"] / (count - 1))
+        samples = info["samples"]
+        q1 = median = q3 = None
+        approx = False
+        if samples:
+            s = pd.Series(samples)
+            q = s.quantile([0.25, 0.5, 0.75])
+            q1 = float(q.iloc[0])
+            median = float(q.iloc[1])
+            q3 = float(q.iloc[2])
+            approx = info["seen"] > len(samples)
+        summaries.append(
+            {
+                "column": col,
+                "count": count,
+                "missing": missing,
+                "mean": mean,
+                "std": None if std is None else round(float(std), 6),
+                "min": info["min"],
+                "q1": q1,
+                "median": median,
+                "q3": q3,
+                "max": info["max"],
+                "quantiles_approx": bool(approx),
+            }
+        )
+
+    payload = {
+        "data_path": str(target),
+        "detected_format": fmt,
+        "rows_scanned": rows_scanned,
+        "columns_profiled": len(summaries),
+        "sample_size": _SUMMARY_STATS_SAMPLE_SIZE,
+        "summaries": summaries,
+        "time_limited": bool(time_limited),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 # 툴: 파싱 가능성 점검
 @tool
 def detect_parseability(
@@ -1054,6 +1309,8 @@ __all__ = [
     "collect_unique_values",
     "mapping_coverage_report",
     "collect_rare_values",
+    "value_counts_topk",
+    "summary_stats",
     # 파싱/인코딩/프로파일
     "detect_parseability",
     "detect_encoding",

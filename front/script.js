@@ -24,7 +24,6 @@ const stageDetailEl = $("stage-detail");
 const stepperEl = $("stepper");
 const downloadsEl = $("downloads");
 const downloadsNoteEl = $("downloads-note");
-// TEMP: tool calls debug panel (remove later)
 const toolCallsEl = $("tool-calls");
 const toolCallsNoteEl = $("tool-calls-note");
 
@@ -32,24 +31,43 @@ let selectedFiles = [];
 let currentStage = "queued";
 let hasRefactored = false;
 let refactorEvents = [];
+let toolCallHistory = [];
+let toolCallsSeenFromStream = false;
 
-function renderToolCalls(toolCalls) {
+function renderToolCallsHistory() {
   if (toolCallsEl) toolCallsEl.innerHTML = "";
   if (toolCallsNoteEl) toolCallsNoteEl.textContent = "";
-  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const calls = Array.isArray(toolCallHistory) ? toolCallHistory : [];
   if (!toolCallsEl) return;
   if (calls.length === 0) {
-    if (toolCallsNoteEl) toolCallsNoteEl.textContent = "선택된 툴 없음";
+    if (toolCallsNoteEl) toolCallsNoteEl.textContent = "사용된 툴 없음";
     return;
   }
   if (toolCallsNoteEl) toolCallsNoteEl.textContent = `총 ${calls.length}개`;
-  calls.forEach((tool) => {
+  calls.forEach((tool, idx) => {
     const li = document.createElement("li");
     const name = tool?.name || "tool";
     const reasonText = typeof tool?.reason === "string" ? tool.reason.trim() : "";
-    li.textContent = reasonText ? `${name} - ${reasonText}` : name;
+    const prefix = `${idx + 1}. `;
+    li.textContent = reasonText ? `${prefix}${name} - ${reasonText}` : `${prefix}${name}`;
     toolCallsEl.appendChild(li);
   });
+}
+
+function resetToolCalls() {
+  toolCallHistory = [];
+  toolCallsSeenFromStream = false;
+  renderToolCallsHistory();
+}
+
+function appendToolCalls(toolCalls) {
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  if (calls.length === 0) return;
+  calls.forEach((tool) => {
+    if (!tool || typeof tool !== "object") return;
+    toolCallHistory.push(tool);
+  });
+  renderToolCallsHistory();
 }
 
 async function checkHealth() {
@@ -233,7 +251,11 @@ function renderResult(data) {
   const code = data.code || "";
   if (scriptEl) scriptEl.textContent = [imports.trim(), code.trim()].filter(Boolean).join("\n\n");
 
-  renderToolCalls(data.tool_calls);
+  if (!toolCallsSeenFromStream) {
+    appendToolCalls(data.tool_calls);
+  } else {
+    renderToolCallsHistory();
+  }
 
   if (downloadsEl) downloadsEl.innerHTML = "";
   if (downloadsNoteEl) downloadsNoteEl.textContent = "";
@@ -345,7 +367,8 @@ async function runWithStream(payload) {
       } else if (msg.type === "stage") {
         setStage(msg.stage, msg.detail || "");
       } else if (msg.type === "tool_calls") {
-        renderToolCalls(msg.tool_calls);
+        toolCallsSeenFromStream = true;
+        appendToolCalls(msg.tool_calls);
       } else if (msg.type === "final") {
         finalData = msg.data;
         setStage("done", "");
@@ -361,7 +384,10 @@ async function runWithStream(payload) {
     if (msg.type === "final") finalData = msg.data;
     if (msg.type === "progress") setRefactorCount(msg.iterations);
     if (msg.type === "stage") setStage(msg.stage, msg.detail || "");
-    if (msg.type === "tool_calls") renderToolCalls(msg.tool_calls);
+    if (msg.type === "tool_calls") {
+      toolCallsSeenFromStream = true;
+      appendToolCalls(msg.tool_calls);
+    }
     if (msg.type === "error") throw new Error(msg.detail || "Unknown error");
   }
 
@@ -435,7 +461,7 @@ form.addEventListener("submit", async (e) => {
     refactorEvents = [];
     if (refactorEventsEl) refactorEventsEl.innerHTML = "";
     if (refactorDetailsEl) refactorDetailsEl.open = false;
-    renderToolCalls([]);
+    resetToolCalls();
     setStage("queued", "요청 준비 중");
     let finalQuestion = question;
 

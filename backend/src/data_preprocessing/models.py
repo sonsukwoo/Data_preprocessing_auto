@@ -12,17 +12,9 @@ class ToolCallArgs(BaseModel):
     path: Optional[str] = Field(default=None, description="데이터 파일/폴더 경로")
     column: Optional[str] = Field(default=None, description="단일 컬럼명")
     columns: Optional[list[str]] = Field(default=None, description="복수 컬럼명")
-    max_unique: Optional[int] = Field(default=None, description="최대 고유값 수집 개수")
-    rare_threshold: Optional[int] = Field(default=None, description="희귀값 기준 빈도")
     mapping_keys: Optional[list[str]] = Field(default=None, description="매핑 키 목록")
     parsers: Optional[list[str]] = Field(default=None, description="파싱 검사 유형 목록")
-    max_values_return: Optional[int] = Field(default=None, description="리포트에 포함할 값 개수 상한")
-    max_rows: Optional[int] = Field(default=None, description="최대 스캔 행 수")
-    time_limit_sec: Optional[int] = Field(default=None, description="스캔 타임아웃(초)")
-    chunksize: Optional[int] = Field(default=None, description="청크 사이즈")
-    sample_bytes: Optional[int] = Field(default=None, description="인코딩 추정용 샘플 바이트 수")
-    max_columns: Optional[int] = Field(default=None, description="프로파일링 최대 컬럼 수")
-    sample_values_limit: Optional[int] = Field(default=None, description="프로파일 샘플 값 개수")
+    top_k: Optional[int] = Field(default=None, description="상위 빈도값 개수")
 class ToolCall(BaseModel):
     """LLM이 선택한 데이터 조사 툴 호출."""
 

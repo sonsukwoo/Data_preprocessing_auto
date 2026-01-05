@@ -503,7 +503,7 @@ def _toolcall_apply_defaults(
     args: dict[str, object],
     default_path: str,
     timeout_only_tools: set[str],
-    limit_keys_by_tool: dict[str, list[str]],
+    allowed_keys_by_tool: dict[str, set[str]],
 ) -> dict[str, object]:
     if "path" not in args and default_path:
         args["path"] = default_path
@@ -541,8 +541,9 @@ def _toolcall_apply_defaults(
                         args["path"] = default_path
     if name in timeout_only_tools:
         args["time_limit_sec"] = 60
-        for key in limit_keys_by_tool.get(name, []):
-            args.pop(key, None)
+    if name in allowed_keys_by_tool:
+        allowed = allowed_keys_by_tool[name]
+        args = {k: v for k, v in args.items() if k in allowed}
     # Drop None/empty placeholders to keep tool args clean.
     args = {k: v for k, v in args.items() if v is not None}
     return args
@@ -916,6 +917,14 @@ def _validation_success_response(
     }
 
 def _validation_coerce_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    # numpy 스칼라를 먼저 파이썬 타입으로 정규화
+    if hasattr(value, "item") and type(value).__module__.startswith("numpy"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
     if isinstance(value, bool):
         return value
     # numpy.bool_ 등 bool 유사 타입 지원
@@ -1035,6 +1044,33 @@ def _validation_extract_requirements(
     if report_reqs is None and isinstance(metrics, dict):
         report_reqs = metrics.get("requirements")
     return report_reqs if isinstance(report_reqs, dict) else None
+
+
+def _validation_normalize_requirements(
+    report_reqs: dict[str, object],
+) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for key, value in report_reqs.items():
+        if isinstance(value, dict):
+            ok_raw = value.get("ok")
+            ok = _validation_coerce_bool(ok_raw)
+            if ok is None and ok_raw is not None:
+                try:
+                    ok = bool(ok_raw)
+                except Exception:
+                    ok = None
+            if ok is not None:
+                updated = dict(value)
+                updated["ok"] = ok
+                normalized[key] = updated
+            else:
+                normalized[key] = value
+            continue
+        ok = _validation_coerce_bool(value)
+        if ok is None:
+            ok = bool(value) if isinstance(value, (int, float, bool)) else False
+        normalized[key] = ok
+    return normalized
 
 
 def _validation_eval_requirements(
