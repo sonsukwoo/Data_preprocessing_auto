@@ -17,138 +17,83 @@
 
 ---
 
-## 빠른 시작 (Docker, 권장)
+## ⚡ 주요 업데이트
 
-1) 루트에서 `.env` 준비
+2024.12.26 ~ 2025.01.06 해당 기간동안 대규모 리팩토링을 통해 시스템 안정성과 성능을 크게 개선하였습니다.
 
-```bash
-cp .env.example .env
-```
+### 1. 보안 및 격리 강도
+최근 보안 패치를 통해 데이터 처리의 안전성을 크게 강화했습니다.
 
-`.env`에 아래를 채우세요(따옴표 없이):
+*   **샌드박스 실행 환경**:
+    *   **별도 컨테이너 실행**: LLM이 생성한 파이썬 코드는 Backend 서버가 아닌, **완전히 격리된 `Executor` Docker 컨테이너** 내부에서 실행됩니다.
+    *   **영향 최소화**: 생성된 코드가 무한 루프에 빠지거나 시스템에 유해한 명령을 실행하더라도, Backend 서비스나 호스트 머신에는 직접적인 영향을 주지 않습니다.
+*   **파일 시스템 격리**:
+    *   **작업 디렉토리 제한**: Backend는 실행 시마다 고유한 `run_id` 기반의 하위 디렉토리를 지정하고, Executor는 해당 디렉토리 내에서만 파일 접근이 허용되어 **다른 실행 건이나 시스템 파일 접근을 원천 차단**합니다.
+    *   **경로 탈출 방지**: 상위 디렉토리 점프 등의 경로 조작 시도를 방어하는 로직이 적용되어 있습니다.
+*   **입력값 검증 및 스코프 관리**:
+    *   **Strict Scope**: `exec()` 실행 시 전역/지역 변수 스코프를 엄격하게 관리하여, 불필요한 시스템 모듈 접근을 제한합니다.
+    *   **Type Safety**: 실행 결과로 반환되는 데이터는 `Safe Serialization`을 거쳐 악성 객체 전달을 막습니다.
 
-```env
-OPENAI_API_KEY=...
-AWS_REGION=eu-north-1
-S3_BUCKET=handsukwoo
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-```
+### 2. 성능 및 최적화
+*   **병렬 툴 실행**: `asyncio.gather`를 도입하여 고유값 추출, 통계 산출, 인코딩 감지 등 여러 분석 작업을 **동시에 병렬로 수행**함으로써 대기 시간을 획기적으로 줄였습니다.
 
-참고:
-- S3 업로드를 쓰지 않으면 AWS 키는 생략 가능합니다.
+### 3. 에이전트 지능
+*   **능동적 리플렉트**: 에러 발생 시 "정보가 부족하다"고 판단되면 스스로 **추가 툴**을 실행하여 단서를 모은 뒤 코드를 수정하는 고차원 추론 루프를 탑재했습니다.
+*   **구조화된 출력 & 한국어 최적화**: Pydantic 기반의 Structured Output과 정교한 한국어 프롬프트로 지시 이행률과 안정성을 높였습니다.
 
-2) 실행
+### 4. 분석 도구 확장
+*   **전수 조사 도구**: 단순 샘플링을 넘어 특정 부분 전수 스캔을 통해 정확한 메타데이터를 추출합니다.
+    *   **효과**: 정확한 데이터 특성 파악으로 코드 생성 오류를 예방하여, **재시도(Refact) 횟수를 획기적으로 줄이고 전체 처리 시간과 분석 신뢰성을 동시에 확보**했습니다.
+    *   `collect_unique_values`: 컬럼 고유값 추출 (범주형 데이터 분석)
+    *   `mapping_coverage_report`: 매핑 키 커버리지 및 누락/초과 분석
+    *   `collect_rare_values`: 이상치 또는 희귀값 식별
+    *   `value_counts_topk`: 상위 빈도값 Top-K 및 비율 분석
+    *   `summary_stats`: 수치형 통계(평균/중앙값/표준편차/분위수) 요약
+    *   `detect_parseability`: 날짜/숫자 등 파싱 가능 여부 진단
+    *   `detect_encoding`: 한글/특수문자 파일 인코딩 자동 감지
+    *   `column_profile`: 컬럼별 타입/결측/샘플 종합 프로파일링
+*   **포맷 대응 강화**: `Parquet`, `Feather`, `Arrow`, `Excel`, 대용량 `JSON` 등 다양한 데이터 포맷을 지원합니다.
 
-```bash
-docker compose up --build
-```
-
-3) 접속
-
-- UI: `http://localhost:8080`
-- API 헬스체크: `http://localhost:8000/health`
-
-중지:
-
-```bash
-docker compose down
-```
-
----
-
-## 사용 설명서
-
-### 1) 요청 문장 작성
-
-- 예: “업로드한 데이터를 정리하고 기준점 잡아서 요약 컬럼 추가 후 저장해줘”
-- 요청 문장은 에이전트가 요구사항을 추출해 검증에 사용합니다.
-
-### 2) 파일/폴더 업로드
-
-- **로컬 파일/폴더 업로드**: UI에서 파일 또는 폴더 선택
-- **S3 업로드**: UI가 presigned PUT로 S3 직접 업로드 시도
-  - 실패 시 자동으로 서버 업로드로 폴백
-- 업로드된 경로는 요청 문장 앞에 자동으로 붙습니다.
-
-### 3) 모델 선택 (선택)
-
-- **분석 모델**: 요구사항 정리/도구 호출/요약에 사용
-- **코드 생성 모델**: 실제 전처리 스크립트 생성에 사용
-- 서버는 허용된 모델만 받으며, 허용 목록 외 모델은 400으로 거부됩니다.
-
-### 4) 실행 및 진행 상황 확인
-
-- UI는 기본적으로 `POST /run_stream`으로 **실시간 진행 단계**를 표시합니다.
-- 단계: 분석 → 샘플링 → 생성 → 실행 → 검증/리팩트 → 완료
-- 오류가 발생하면 자동으로 리팩트 루프를 돌며 최대 N회 수정합니다.
-
-### 5) 결과 확인 및 다운로드
-
-- 결과 파일은 `run_id`와 함께 제공되며 다운로드 링크가 생성됩니다.
-- 미리보기 지원: `GET /downloads/{run_id}/{filename}/preview?n=20`
-- 내부 기록(Trace) 파일이 함께 생성되어 실행 과정과 오류를 추적할 수 있습니다.
-
-### 6) 만료/정리 정책
-
-- 결과물과 업로드는 **기본 30분 TTL** 이후 자동 삭제됩니다.
-- 파일이 남아 있어도 `run_id`가 만료되면 다운로드가 실패할 수 있습니다.
+### 5. 랭그래프 구조 효율화
+*   **순환형 리플렉트 루프**: 기존의 단방향 흐름(에러→수정)을 개선하여, `reflect` 노드가 필요 시 `run_planned_tools`로 회귀하여 추가 정보를 수집한 후 다시 수정 단계로 돌아오는 **능동적 순환 구조**를 구현했습니다.
+*   **조건부 엣지 최적화**: `route_after_reflect`, `route_after_tools` 등 라우팅 로직을 세분화하여 불필요한 노드 실행을 방지하고 상태 전이(State Transition)를 명확히 했습니다.
+*   **상태 관리 모듈화**: 복잡한 그래프 로직을 `node_utils.py`와 `workflow.py`로 역할 단위로 분리하여 유지보수성과 확장성을 높였습니다.
 
 ---
 
----
-
-## CLI 실행 방법
-
-Docker나 UI 없이 터미널에서 직접 에이전트를 실행할 수 있습니다. (개발 및 디버깅 용도)
-
-1) **준비**:
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   # 루트의 .env가 있다면 로드됩니다.
-   ```
-
-2) **실행**:
-   ```bash
-   # 사용 예시
-   python -m src.data_preprocessing.cli --request "데이터를 로드해서 요약해줘"
-   ```
-
-3) **주요 옵션**:
-   - `--request`: 요청 문장 (필수)
-   - `--max-iterations`: 최대 수정 시도 횟수 (기본 3)
-   - `--llm-model`: 분석 모델 (기본 `gpt-4o-mini`)
-   - `--coder-model`: 코드 생성 모델 (기본 `gpt-4.1`)
-
----
-
-## 아키텍처
+## 🏗️ 아키텍처
 
 ### 전체 구성
 
 ```mermaid
 flowchart LR
-  U["User Browser"] -->|"HTTP 8080"| N["Nginx front"]
-  N -->|"API proxy"| A["FastAPI backend 8000"]
-  A --> G["LangGraph Agent"]
-  G -->|"inspect + fixed routing"| T["inspect_input_node"]
-  T -->|"table"| S["run_sample_and_summarize"]
-  T -->|"images"| IM["run_image_manifest"]
-  S --> C["build_context"]
-  IM --> C
-  G -->|"tool planning (chatbot/reflect)"| TP["run_planned_tools"]
-  TP --> TOOL["scan tools"]
-  TP -->|"tool_reports"| G
-  G -->|"generate code"| P["Python script (Source)"]
+  User["User (Browser)"]
   
-  %% Executor Integration
-  P -->|"POST /execute"| E["Executor Service (Sandbox)"]
-  E -->|"write outputs"| O["Shared Volume / Outputs"]
+  subgraph Services ["Docker Compose Services"]
+    direction TB
+    N["Nginx (8080)"]
+    B["FastAPI Backend (8000)"]
+    E["Executor (Sandbox)"]
+    V[("Shared Volume <br/> (outputs/)")]
+    
+    N -->|"Proxy"| B
+    B -->|"Orchestrate"| Agent("LangGraph Agent")
+    
+    Agent -- "1. Code Check Node" --> E
+    E -- "2. Run Code & Write" --> V
+  end
   
-  A -->|"downloads + preview"| U
-  A -->|"presign + optional download"| S3["S3 bucket"]
-  U -->|"presigned upload (optional)"| S3
+  S3["AWS S3"]
+  
+  User -->|"Visit UI"| N
+  User -->|"Direct Upload"| S3
+  B -- "Presign / Download" --> S3
+  B -- "Read Results" --> V
+  B -- "Download Link" --> User
+  
+  %% Style
+  style E fill:#f9f,stroke:#333
+  style Agent fill:#bbf,stroke:#333
 ```
 
 S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 FastAPI는 **presign 발급 + 필요 시 S3에서 다운로드/경로 변환**을 수행합니다.
@@ -169,10 +114,10 @@ flowchart TD
   D -->|yes| X[friendly_error] --> H[END]
   D -->|no| B[chatbot]
   B --> T[run_planned_tools]
-  T --> E[generate]
+  T --> E[generate <br/>(Initial Code)]
   E --> F[code_check]
   F --> FE{exec_error}
-  FE -->|yes| R[reflect]
+  FE -->|yes| R[reflect <br/>(Fix Code)]
   FE -->|no| G{validate}
   G -->|pass| H
   G -->|fail| R
@@ -208,7 +153,7 @@ flowchart TD
   D4 -->|yes| FE[friendly_error]
   D4 -->|no| C[chatbot]
   C --> TP[run_planned_tools]
-  TP --> G[generate]
+  TP --> G[generate <br/>(Initial)]
 
   G --> E[code_check]
   E --> D5{exec_ok}
@@ -219,7 +164,7 @@ flowchart TD
   D6 -->|yes| END
   D6 -->|no| D
 
-  D -->|left| RF[reflect]
+  D -->|left| RF[reflect <br/>(Fix/Regen)]
   D -->|exceeded| FE
 
   RF --> RT2{need_more_tools}
@@ -267,16 +212,88 @@ flowchart TD
 
 ---
 
-## 파일 업로드 방식 (S3 / 서버 업로드)
+## 📖 사용 설명서 (User Guide)
+
+### Step 1. 파일 업로드 (Upload)
+웹 UI의 "파일 업로드" 영역에 전처리할 데이터를 드래그 획은 클릭하여 업로드하세요.
+- **지원 포맷**: `.csv`, `.xlsx`, `.json`, `.parquet`, `.arrow` 등 단일 파일 및 **폴더(Directory, 이미지 데이터셋 등)**
+
+### Step 2. 요청하기 (Request)
+"전처리 요청" 입력창에 원하는 작업을 **자연어**로 적어주세요. 마치 사람에게 시키듯이 구체적으로 적을수록 결과가 정확합니다.
+
+> **작성 예시 (Best Practice):**
+> - "이 데이터(`data.csv`)를 읽어서 결측치는 평균으로 채우고, 'price' 컬럼의 이상치(상위 1%)를 제거한 뒤 `parquet` 포맷으로 저장해줘."
+> - "범주형 컬럼들은 원핫 인코딩해주고, 날짜 컬럼은 년/월/일로 분리해서 파생 변수를 만들어줘."
+
+### Step 3. 모델 선택 (옵션)
+필요하다면 **분석 모델**과 **코딩 모델**을 다르게 설정할 수 있습니다.
+- **Analysis Model (분석용)**: `gpt-4o-mini` 권장 (빠르고 저렴하게 요약 및 툴 계획)
+- **Coding Model (코딩용)**: `gpt-4.1` 권장 (복잡한 로직 구현 및 검증 코드 작성에 탁월)
+
+### Step 4. 실시간 진행 모니터링
+요청을 보내면 화면에 **실시간 진행 단계(Stepper)** 가 표시됩니다. AI가 어떻게 생각하고 일하는지 지켜보세요.
+1.  **🔍 데이터 분석 (Inspect & Sample)**: 데이터를 뜯어보고 컬럼 구조와 타입을 파악합니다.
+2.  **🧠 계획 수립 (Planning)**: "아, 이 컬럼은 고유값을 전수 조사해야겠네?" 하고 필요한 도구를 고릅니다.
+3.  **🏃 도구 실행 (Tools)**: 선택한 도구들을 병렬로 실행해 필요한 메타데이터(고유값, 분포 등)를 수집합니다.
+4.  **💻 코드 생성 & 실행 (Generate & Exec)**: 수집된 정보를 바탕으로 완벽한 파이썬 코드를 짜서 격리된 환경에서 돌립니다.
+5.  **✅ 검증 (Validate)**: 결과물이 요구사항에 맞는지 스스로 채점합니다. 틀리면 다시 고칩니다.
+
+### Step 5. 결과 확인 및 다운로드
+모든 작업이 끝나면 완료 메시지와 함께 다운로드 버튼이 생깁니다.
+- **결과 파일**: 요청한 포맷(csv, parquet 등)으로 정제된 데이터입니다.
+- **미리보기**: `Preview` 버튼을 눌러 결과 데이터의 상위 20행을 즉시 확인해보세요.
+- **내부 기록(Trace)**: `run_..._internal_trace.md` 파일에는 AI의 생각 과정, 실행한 코드, 에러 해결 로그가 모두 담겨 있습니다. (디버깅용)
+
+> **⚠️ 주의**: 결과 파일은 생성 후 **30분 뒤에 자동 삭제**됩니다. 필요한 파일은 바로 다운로드하세요.
+
+---
+
+## 🚀 빠른 시작 (Docker, 권장)
+
+1) 루트에서 `.env` 준비
+
+```bash
+cp .env.example .env
+```
+
+`.env`에 아래를 채우세요(따옴표 없이):
+
+```env
+OPENAI_API_KEY=...
+AWS_REGION=eu-north-1
+S3_BUCKET=handsukwoo
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+```
+
+참고:
+- S3 업로드를 쓰지 않으면 AWS 키는 생략 가능합니다.
+
+2) 실행
+
+```bash
+docker compose up --build
+```
+
+3) 접속
+
+- UI: `http://localhost:8080`
+- API 헬스체크: `http://localhost:8000/health`
+
+중지:
+
+```bash
+docker compose down
+```
+
+### 파일 업로드 방식 (S3 / 서버 업로드)
 
 UI는 우선 **S3 presigned PUT** 업로드를 시도합니다.
 브라우저에서 S3로 직접 업로드하려면 **버킷 CORS 설정**이 필요합니다(미설정 시 Safari/Chrome에서 `Load failed` 가능).
 
 S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)로 폴백합니다.
 
----
-
-## 산출물/업로드 정리(자동 삭제)
+### 산출물/업로드 정리(자동 삭제)
 
 실행 산출물과 업로드 파일은 **기본 30분 TTL**로 자동 삭제됩니다.
 
@@ -286,9 +303,7 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
   - `RUN_OUTPUT_TTL_SECONDS` (기본 1800초)
   - `RUN_OUTPUT_CLEANUP_INTERVAL_SECONDS` (기본 300초)
 
----
-
-## 미리보기(Preview)
+### 미리보기(Preview)
 
 다운로드 링크와 별도로, 결과 파일 상위 행 미리보기를 제공합니다.
 
@@ -296,17 +311,13 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
   - CSV/Parquet/XLSX 등 표 형식 파일만 지원
   - 응답: `{ filename, columns, rows }`
 
----
-
-## 모델 선택
+### 모델 선택 (상세)
 
 - UI에서 **분석 모델 / 코드 생성 모델**을 각각 선택합니다.
   - 기본값: `gpt-4o-mini` / `gpt-4.1`
 - 서버는 허용된 모델만 받으며, 허용 목록 외 모델은 400으로 거부됩니다.
 
----
-
-## 내부 기록 파일 (Trace)
+### 내부 기록 파일 (Trace)
 
 매 실행마다 아래 파일이 결과물로 함께 생성됩니다:
 
@@ -323,44 +334,25 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 
 ---
 
-## 주요 업데이트
+## ⚙️ CLI 실행 방법
 
-2024.12.26 ~ 2025.01.06 해당 기간동안 대규모 리팩토링을 통해 시스템 안정성과 성능을 크게 개선하였습니다.
+Docker나 UI 없이 터미널에서 직접 에이전트를 실행할 수 있습니다. (개발 및 디버깅 용도)
 
-### 1. 보안 및 격리 강도
-최근 보안 패치를 통해 데이터 처리의 안전성을 크게 강화했습니다.
+1) **준비**:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   # 루트의 .env가 있다면 로드됩니다.
+   ```
 
-*   **샌드박스 실행 환경**:
-    *   **별도 컨테이너 실행**: LLM이 생성한 파이썬 코드는 Backend 서버가 아닌, **완전히 격리된 `Executor` Docker 컨테이너** 내부에서 실행됩니다.
-    *   **영향 최소화**: 생성된 코드가 무한 루프에 빠지거나 시스템에 유해한 명령을 실행하더라도, Backend 서비스나 호스트 머신에는 직접적인 영향을 주지 않습니다.
-*   **파일 시스템 격리**:
-    *   **작업 디렉토리 제한**: Backend는 실행 시마다 고유한 `run_id` 기반의 하위 디렉토리를 지정하고, Executor는 해당 디렉토리 내에서만 파일 접근이 허용되어 **다른 실행 건이나 시스템 파일 접근을 원천 차단**합니다.
-    *   **경로 탈출 방지**: 상위 디렉토리 점프 등의 경로 조작 시도를 방어하는 로직이 적용되어 있습니다.
-*   **입력값 검증 및 스코프 관리**:
-    *   **Strict Scope**: `exec()` 실행 시 전역/지역 변수 스코프를 엄격하게 관리하여, 불필요한 시스템 모듈 접근을 제한합니다.
-    *   **Type Safety**: 실행 결과로 반환되는 데이터는 `Safe Serialization`을 거쳐 악성 객체 전달을 막습니다.
+2) **실행**:
+   ```bash
+   # 사용 예시
+   python -m src.data_preprocessing.cli --request "데이터를 로드해서 요약해줘"
+   ```
 
-### 2. 성능 및 최적화
-*   **병렬 툴 실행**: `asyncio.gather`를 도입하여 고유값 추출, 통계 산출, 인코딩 감지 등 여러 분석 작업을 **동시에 병렬로 수행**함으로써 대기 시간을 획기적으로 줄였습니다.
-
-### 3. 에이전트 지능
-*   **능동적 리플렉트 (Active Reflection)**: 에러 발생 시 "정보가 부족하다"고 판단되면 스스로 **추가 툴**을 실행하여 단서를 모은 뒤 코드를 수정하는 고차원 추론 루프를 탑재했습니다.
-*   **구조화된 출력 & 한국어 최적화**: Pydantic 기반의 Structured Output과 정교한 한국어 프롬프트로 지시 이행률과 안정성을 높였습니다.
-
-### 4. 분석 도구 확장
-*   **전수 조사 도구**: 단순 샘플링을 넘어 특정 부분 전수 스캔을 통해 정확한 메타데이터를 추출합니다.
-    *   **효과**: 정확한 데이터 특성 파악으로 코드 생성 오류를 예방하여, **재시도(Refact) 횟수를 획기적으로 줄이고 전체 처리 시간과 분석 신뢰성을 동시에 확보**했습니다.
-    *   `collect_unique_values`: 컬럼 고유값 추출 (범주형 데이터 분석)
-    *   `mapping_coverage_report`: 매핑 키 커버리지 및 누락/초과 분석
-    *   `collect_rare_values`: 이상치 또는 희귀값 식별
-    *   `value_counts_topk`: 상위 빈도값 Top-K 및 비율 분석
-    *   `summary_stats`: 수치형 통계(평균/중앙값/표준편차/분위수) 요약
-    *   `detect_parseability`: 날짜/숫자 등 파싱 가능 여부 진단
-    *   `detect_encoding`: 한글/특수문자 파일 인코딩 자동 감지
-    *   `column_profile`: 컬럼별 타입/결측/샘플 종합 프로파일링
-*   **포맷 대응 강화**: `Parquet`, `Feather`, `Arrow`, `Excel`, 대용량 `JSON` 등 다양한 데이터 포맷을 지원합니다.
-
-### 5. 랭그래프 구조 효율화
-*   **순환형 리플렉트 루프**: 기존의 단방향 흐름(에러→수정)을 개선하여, `reflect` 노드가 필요 시 `run_planned_tools`로 회귀하여 추가 정보를 수집한 후 다시 수정 단계로 돌아오는 **능동적 순환 구조**를 구현했습니다.
-*   **조건부 엣지 최적화**: `route_after_reflect`, `route_after_tools` 등 라우팅 로직을 세분화하여 불필요한 노드 실행을 방지하고 상태 전이(State Transition)를 명확히 했습니다.
-*   **상태 관리 모듈화**: 복잡한 그래프 로직을 `node_utils.py`와 `workflow.py`로 역할 단위로 분리하여 유지보수성과 확장성을 높였습니다.
+3) **주요 옵션**:
+   - `--request`: 요청 문장 (필수)
+   - `--max-iterations`: 최대 수정 시도 횟수 (기본 3)
+   - `--llm-model`: 분석 모델 (기본 `gpt-4o-mini`)
+   - `--coder-model`: 코드 생성 모델 (기본 `gpt-4.1`)
