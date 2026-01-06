@@ -40,10 +40,17 @@ body {
 
 .status {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
   color: var(--muted);
   font-weight: 600;
+}
+
+.status-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .dot {
@@ -63,12 +70,12 @@ body {
 }
 
 .layout {
-  width: min(100%, 1320px);
-  max-width: 1320px;
+  width: min(100%, 1480px);
+  max-width: 1480px;
   margin: 12px auto;
-  padding: 0 16px 32px;
+  padding: 0 12px 32px;
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+  grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
   gap: 16px;
 }
 
@@ -113,6 +120,40 @@ label {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.inline-select {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  background: #fbfaf7;
+}
+
+.inline-select label {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.inline-select select {
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: #ffffff;
+  padding: 6px 10px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.inline-select select:focus {
+  outline: none;
+  border-color: rgba(31, 122, 107, 0.4);
+  box-shadow: 0 0 0 2px rgba(31, 122, 107, 0.12);
 }
 
 .muted {
@@ -457,6 +498,11 @@ button:hover:not(:disabled) {
 .stage-text {
   font-weight: 800;
   color: #0f172a;
+}
+
+.stage-timer {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
 }
 
 .result-group.collapsible {

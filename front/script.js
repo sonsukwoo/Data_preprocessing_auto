@@ -21,6 +21,7 @@ const refactorEventsEl = $("refactor-events");
 const progressEl = $("progress");
 const stageTextEl = $("stage-text");
 const stageDetailEl = $("stage-detail");
+const stageTimerEl = $("stage-timer");
 const stepperEl = $("stepper");
 const downloadsEl = $("downloads");
 const downloadsNoteEl = $("downloads-note");
@@ -33,6 +34,34 @@ let hasRefactored = false;
 let refactorEvents = [];
 let toolCallHistory = [];
 let toolCallsSeenFromStream = false;
+let runTimerStart = null;
+let runTimerId = null;
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const seconds = String(totalSec % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function updateRunTimer() {
+  if (!stageTimerEl || runTimerStart === null) return;
+  const elapsed = Date.now() - runTimerStart;
+  stageTimerEl.textContent = `경과 시간 ${formatElapsed(elapsed)}`;
+}
+
+function startRunTimer() {
+  runTimerStart = Date.now();
+  updateRunTimer();
+  if (runTimerId) clearInterval(runTimerId);
+  runTimerId = setInterval(updateRunTimer, 1000);
+}
+
+function stopRunTimer() {
+  if (runTimerId) clearInterval(runTimerId);
+  runTimerId = null;
+  updateRunTimer();
+}
 
 function renderToolCallsHistory() {
   if (toolCallsEl) toolCallsEl.innerHTML = "";
@@ -140,30 +169,40 @@ function setRefactorCount(n) {
 const MAIN_STAGES = [
   "queued",
   "inspecting",
-  "sampling",
-  "context",
   "analyzing",
   "tooling",
   "generating",
   "executing",
-  "validating",
   "finalizing",
   "done",
 ];
 const BRANCH_STAGE = "refactoring";
 
+const STAGE_BUCKET = {
+  queued: "queued",
+  inspecting: "inspecting",
+  sampling: "analyzing",
+  context: "analyzing",
+  analyzing: "analyzing",
+  tooling: "tooling",
+  generating: "generating",
+  executing: "executing",
+  validating: "finalizing",
+  finalizing: "finalizing",
+  // Map refactoring to generating (code creation) as requested
+  refactoring: "generating",
+  done: "done",
+};
+
 const STAGE_LABELS = {
   queued: "대기 중",
   inspecting: "입력 검사 중",
-  sampling: "데이터 샘플링 중",
-  context: "컨텍스트 구성 중",
-  analyzing: "요구사항 정리 중",
-  tooling: "툴 조사/전수 스캔 중",
-  generating: "스크립트 생성 중",
-  executing: "스크립트 실행 중",
-  validating: "요구사항 검증 중",
-  refactoring: "리팩트 중",
-  finalizing: "결과 정리 중",
+  analyzing: "요구사항 분석 중",
+  tooling: "툴 실행 중",
+  generating: "코드 생성 중",
+  executing: "실행 중",
+  refactoring: "리팩트 중 (코드 재생성)",
+  finalizing: "정리 중",
   done: "완료",
   error: "실패",
 };
@@ -174,18 +213,24 @@ function setStage(stage, detail = "") {
   const prevStage = currentStage;
   currentStage = stage;
   if (stage === BRANCH_STAGE) hasRefactored = true;
-  progressEl.classList.toggle("failed", stage === "error");
+
+  // Turn RED if error OR refactoring (as refactor implies fixing an error)
+  const isErrorOrRefactor = stage === "error" || stage === BRANCH_STAGE;
+  progressEl.classList.toggle("failed", isErrorOrRefactor);
+
   if (refactorDetailsEl) {
     refactorDetailsEl.classList.toggle("active-refactor", stage === BRANCH_STAGE);
   }
 
-  // main flow: queued → analyzing → sampling → generating → executing → finalizing → done
+  const displayStage = stage === BRANCH_STAGE ? "generating" : (STAGE_BUCKET[stage] || stage);
+
+  // main flow: queued → inspecting → analyzing → tooling → generating → executing → finalizing → done
   const mainIndexByStage = new Map(MAIN_STAGES.map((s, i) => [s, i]));
-  const mainIndex = mainIndexByStage.has(stage)
-    ? mainIndexByStage.get(stage)
+  const mainIndex = mainIndexByStage.has(displayStage)
+    ? mainIndexByStage.get(displayStage)
     : // if branching refactor (or unknown), keep last main stage or fall back to validating/executing
-      mainIndexByStage.get(mainIndexByStage.has(prevStage) ? prevStage : "validating") ??
-      mainIndexByStage.get("executing");
+    mainIndexByStage.get(mainIndexByStage.has(prevStage) ? prevStage : "finalizing") ??
+    mainIndexByStage.get("executing");
 
   const steps = Array.from(stepperEl.querySelectorAll(".step"));
   steps.forEach((el) => {
@@ -201,7 +246,7 @@ function setStage(stage, detail = "") {
         // done for all earlier steps
         if (idx < mainIndex) el.classList.add("done");
         // active only when currently on that main stage (not during branch)
-        if (stage === s) el.classList.add("active");
+        if (displayStage === s) el.classList.add("active");
         if (stage === "done" && s === "done") el.classList.add("active");
         if (stage === "done") el.classList.add("done");
       }
@@ -224,7 +269,7 @@ function setStage(stage, detail = "") {
     }
   });
 
-  if (stageTextEl) stageTextEl.textContent = STAGE_LABELS[stage] || stage;
+  if (stageTextEl) stageTextEl.textContent = STAGE_LABELS[displayStage] || STAGE_LABELS[stage] || stage;
   if (stageDetailEl) stageDetailEl.textContent = detail || "";
 
   if (stage === BRANCH_STAGE && prevStage !== BRANCH_STAGE) {
@@ -463,6 +508,7 @@ form.addEventListener("submit", async (e) => {
     if (refactorDetailsEl) refactorDetailsEl.open = false;
     resetToolCalls();
     setStage("queued", "요청 준비 중");
+    startRunTimer();
     let finalQuestion = question;
 
     // 파일이 있으면 먼저 업로드 → 경로를 질문에 포함
@@ -536,6 +582,7 @@ form.addEventListener("submit", async (e) => {
     setStage("error", err.message || "");
     showToast(`실패: ${err.message}`);
   } finally {
+    stopRunTimer();
     btn.disabled = false;
     btn.textContent = "실행";
   }
@@ -582,3 +629,4 @@ checkHealth();
 setStage("queued", "대기 중");
 setRefactorCount(0);
 updateFileSummary([]);
+updateRunTimer();

@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import requests
+
 from .models import State
 
 # ========================== 시간/경로 유틸 ==========================
@@ -149,45 +151,68 @@ def prepare_execution_workdir() -> Path:
     return execution_workdir
 
 
+# 필요한 경우 최상위 또는 함수 내부에서 requests를 import합니다.
+# 최상위 imports에 추가하지 않았으므로, 인라인 import를 허용하거나 사용 가능하다고 가정합니다.
+# 하지만 깔끔함을 위해 imports를 확인하는 것이 좋습니다. 안전을 위해 인라인 import를 사용합니다.
+
 def run_generated_code(
     imports: str,
     code: str,
     execution_workdir: Path,
 ) -> tuple[dict[str, Any], str, str | None, str | None]:
-    stdout_buffer = io.StringIO()
-    exec_globals: dict[str, Any] = {}
-    prev_cwd = os.getcwd()
+    
+    # Executor URL 정의
+    # Docker 네트워크에서 'executor'는 호스트 이름입니다. 기본 포트 8000.
+    EXECUTOR_URL = os.environ.get("EXECUTOR_URL", "http://executor:8000/execute")
+
+    # workdir 상대 경로 계산 (backend/outputs 기준)
+    # 예: /app/backend/outputs/_staging/run_123 -> _staging/run_123
     try:
-        os.chdir(str(execution_workdir))
-        with contextlib.redirect_stdout(stdout_buffer):
-            exec(imports + "\n" + code, exec_globals)
-    except SystemExit as exc:
-        try:
-            os.chdir(prev_cwd)
-        except Exception:
-            pass
-        captured = stdout_buffer.getvalue()
-        error_detail = (
-            captured + "\n" + f"SystemExit: {getattr(exc, 'code', exc)}\n" + traceback.format_exc()
-        )
-        return exec_globals, captured, "system_exit", error_detail
-    except BaseException as exc:  # noqa: BLE001
-        if isinstance(exc, KeyboardInterrupt):
-            raise
-        try:
-            os.chdir(prev_cwd)
-        except Exception:
-            pass
-        captured = stdout_buffer.getvalue()
-        error_detail = captured + "\n" + traceback.format_exc()
-        return exec_globals, captured, "exception", error_detail
-    finally:
-        try:
-            os.chdir(prev_cwd)
-        except Exception:  # noqa: BLE001
-            pass
-    output_preview = stdout_buffer.getvalue()
-    return exec_globals, output_preview, None, None
+        root_dir = outputs_root_dir().resolve()
+        relative_workdir = str(execution_workdir.resolve().relative_to(root_dir))
+    except ValueError:
+        # 경로가 일치하지 않으면 기본값 사용 (혹은 에러 처리)
+        relative_workdir = ""
+
+    payload = {
+        "code": code,
+        "imports": imports,
+        "workdir": relative_workdir
+    }
+
+    try:
+        # 타임아웃을 설정하여 요청 (예: 긴 처리를 위해 60초)
+        response = requests.post(EXECUTOR_URL, json=payload, timeout=60)
+        
+        # 네트워크/HTTP 에러 확인
+        if response.status_code != 200:
+            return {}, "", "connection_error", f"Executor returned status {response.status_code}: {response.text}"
+            
+        data = response.json()
+        
+        # 응답 파싱
+        stdout_captured = data.get("stdout", "")
+        error_kind = data.get("error_kind")
+        error_detail = data.get("error_detail")
+        results = data.get("results", {})
+        
+        # 결과를 통해 exec_globals 재구성
+        # 요청한 항목(validation_report 등)만 반환받으므로
+        # 실제 globals의 부분집합이지만, 워크플로우에는 충분합니다.
+        exec_globals = results
+        
+        if error_kind:
+            # 일관성을 위해 에러 상세 내용을 stdout에 추가
+            if not error_detail:
+                error_detail = "Unknown error occurred in executor."
+            full_log = stdout_captured + "\n" + error_detail
+            return exec_globals, stdout_captured, error_kind, full_log
+            
+        return exec_globals, stdout_captured, None, None
+
+    except Exception as e:
+        return {}, "", "execution_request_failed", f"Failed to connect to executor: {str(e)}"
+
 
 # ========================== 파일/출력 유틸 ==========================
 def cleanup_dir(path: Path) -> None:

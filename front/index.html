@@ -1,161 +1,161 @@
 <!doctype html>
 <html lang="ko">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>데이터 전처리 워크플로우</title>
-    <link rel="stylesheet" href="style.css?v=20260105-4" />
-  </head>
-  <body>
-    <header class="topbar">
-      <div>
-        <h1>데이터 전처리 워크플로우</h1>
-        <p class="subtitle">요구사항 기반으로 데이터 정리·요약·변환을 수행합니다.</p>
-      </div>
-      <div class="status">
-        <span id="health-dot" class="dot offline"></span>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>데이터 전처리 워크플로우</title>
+  <link rel="stylesheet" href="style.css?v=20260106-2" />
+</head>
+
+<body>
+  <header class="topbar">
+    <div>
+      <h1>데이터 전처리 워크플로우</h1>
+      <p class="subtitle">요구사항 기반으로 데이터 정리·요약·변환을 수행합니다.</p>
+    </div>
+    <div class="status">
+      <div class="status-row">
         <span id="health-text">백엔드 미확인</span>
+        <span id="health-dot" class="dot offline"></span>
       </div>
-    </header>
+      <span id="stage-timer" class="stage-timer muted">경과 시간 00:00</span>
+    </div>
+  </header>
 
-    <main class="layout">
-      <section class="panel input-panel">
-        <form id="run-form">
-          <div class="step-block">
-            <div class="step-title"><span class="step-num">1</span>요청 입력</div>
-            <label>
-              요청 문장
-              <textarea id="question" required placeholder="예) 결측치를 처리하고 요약표를 만들어 주세요" rows="6"></textarea>
-            </label>
-          </div>
+  <main class="layout">
+    <section class="panel input-panel">
+      <form id="run-form">
+        <div class="step-block">
+          <div class="step-title"><span class="step-num">1</span>요청 입력</div>
+          <label>
+            요청 문장
+            <textarea id="question" required placeholder="예) 결측치를 처리하고 요약표를 만들어 주세요" rows="6"></textarea>
+          </label>
+        </div>
 
-          <div class="step-block">
-            <div class="step-title"><span class="step-num">2</span>데이터 업로드</div>
-            <div class="dropzone" id="dropzone">
-              <input type="file" id="file-input" multiple webkitdirectory />
-              <p class="upload-hint">CSV/TSV/JSON/Excel/Parquet/Arrow/Feather, 또는 이미지 폴더를 지원합니다.</p>
-              <div class="upload-status-row">
-                <span id="upload-status" class="muted"></span>
-              </div>
+        <div class="step-block">
+          <div class="step-title"><span class="step-num">2</span>데이터 업로드</div>
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="file-input" multiple webkitdirectory />
+            <p class="upload-hint">CSV/TSV/JSON/Excel/Parquet/Arrow/Feather, 또는 이미지 폴더를 지원합니다.</p>
+            <div class="upload-status-row">
+              <span id="upload-status" class="muted"></span>
             </div>
           </div>
+        </div>
 
-          <details class="advanced">
-            <summary>고급 설정</summary>
-            <div class="advanced-body">
+        <div class="inline-select">
+          <label for="output_format">출력 포맷</label>
+          <select id="output_format">
+            <option value="csv" selected>CSV</option>
+            <option value="parquet">Parquet</option>
+            <option value="feather">Feather</option>
+            <option value="json">JSON/JSONL</option>
+            <option value="excel">Excel(xlsx)</option>
+            <option value="huggingface">HuggingFace Dataset</option>
+          </select>
+        </div>
+
+        <details class="advanced">
+          <summary>고급 설정</summary>
+          <div class="advanced-body">
+            <div class="grid">
               <label>
-                출력 포맷
-                <select id="output_format">
-                  <option value="csv" selected>CSV</option>
-                  <option value="parquet">Parquet</option>
-                  <option value="feather">Feather</option>
-                  <option value="json">JSON/JSONL</option>
-                  <option value="excel">Excel(xlsx)</option>
-                  <option value="huggingface">HuggingFace Dataset</option>
+                분석 모델
+                <select id="llm_model">
+                  <option value="gpt-4.1-nano">빠름 (gpt-4.1-nano)</option>
+                  <option value="gpt-4o-mini" selected>기본 (gpt-4o-mini)</option>
+                  <option value="gpt-4o">정확도↑ (gpt-4o)</option>
                 </select>
               </label>
 
-              <div class="grid">
-                <label>
-                  분석 모델
-                  <select id="llm_model">
-                    <option value="gpt-4.1-nano">빠름 (gpt-4.1-nano)</option>
-                    <option value="gpt-4o-mini" selected>기본 (gpt-4o-mini)</option>
-                    <option value="gpt-4o">정확도↑ (gpt-4o)</option>
-                  </select>
-                </label>
-
-                <label>
-                  코드 생성 모델
-                  <select id="coder_model">
-                    <option value="gpt-4.1-mini">빠름·가성비 (gpt-4.1-mini)</option>
-                    <option value="gpt-4.1" selected>기본 (gpt-4.1)</option>
-                    <option value="gpt-5.1">정확도↑ (gpt-5.1)</option>
-                  </select>
-                </label>
-              </div>
-              <span class="muted">모델 선택은 필요할 때만 변경하세요.</span>
-
               <label>
-                최대 오류 수정 횟수
-                <input id="max_iterations" type="number" min="1" max="10" value="5" />
+                코드 생성 모델
+                <select id="coder_model">
+                  <option value="gpt-4.1-mini">빠름·가성비 (gpt-4.1-mini)</option>
+                  <option value="gpt-4.1" selected>기본 (gpt-4.1)</option>
+                  <option value="gpt-5.1">정확도↑ (gpt-5.1)</option>
+                </select>
               </label>
             </div>
-          </details>
+            <span class="muted">모델 선택은 필요할 때만 변경하세요.</span>
 
-          <button type="submit" id="run-btn">처리 시작</button>
-        </form>
-      </section>
-
-      <section class="panel results">
-        <div class="result-group progress" id="progress">
-          <div class="progress-top">
-            <div class="label">진행 상황</div>
-            <div class="progress-meta">
-                <details id="refactor-details" class="refactor-details">
-                  <summary class="refactor-pill">
-                    <span class="refactor-pill-label">리팩트</span>
-                    <span id="refactor-count-inline" class="refactor-badge">0</span>
-                  </summary>
-                  <div class="refactor-panel">
-                    <div class="refactor-panel-title">최근 리팩트</div>
-                    <ul id="refactor-events" class="refactor-events"></ul>
-                  </div>
-                </details>
-            </div>
+            <label>
+              최대 오류 수정 횟수
+              <input id="max_iterations" type="number" min="1" max="10" value="5" />
+            </label>
           </div>
-          <div class="stepper-flow" id="stepper">
-            <div class="step main" data-stage="queued">대기</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="inspecting">입력 검사</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="sampling">샘플링</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="context">컨텍스트</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="analyzing">요구사항</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="tooling">툴 조사</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="generating">생성</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="executing">실행</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="validating">검증</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="finalizing">정리</div>
-            <div class="arrow" aria-hidden="true">→</div>
-            <div class="step main" data-stage="done">완료</div>
-            <!-- 리팩트 브랜치 표시 제거 -->
-          </div>
-          <div class="progress-text">
-            <span id="stage-text" class="stage-text">대기 중</span>
-            <span id="stage-detail" class="muted"></span>
-          </div>
-        </div>
-        <!-- TEMP: tool calls debug panel (remove later) -->
-        <div class="result-group">
-          <div class="label">선택된 툴</div>
-          <div class="muted" id="tool-calls-note"></div>
-          <ul id="tool-calls"></ul>
-        </div>
-        <details class="result-group collapsible">
-          <summary class="label">생성된 코드</summary>
-          <pre id="script"></pre>
         </details>
-        <div class="result-group">
-          <div class="label">결과 파일</div>
-          <div class="muted" id="downloads-note"></div>
-          <ul id="downloads"></ul>
-        </div>
-        <div class="result-group">
-          <div class="label">오류/메시지</div>
-          <ul id="messages"></ul>
-        </div>
-      </section>
-    </main>
 
-    <div id="toast" class="toast hidden"></div>
-    <script src="script.js?v=20260105-4"></script>
-  </body>
+        <button type="submit" id="run-btn">처리 시작</button>
+      </form>
+    </section>
+
+    <section class="panel results">
+      <div class="result-group progress" id="progress">
+        <div class="progress-top">
+          <div class="label">진행 상황</div>
+          <div class="progress-meta">
+            <details id="refactor-details" class="refactor-details">
+              <summary class="refactor-pill">
+                <span class="refactor-pill-label">리팩트</span>
+                <span id="refactor-count-inline" class="refactor-badge">0</span>
+              </summary>
+              <div class="refactor-panel">
+                <div class="refactor-panel-title">최근 리팩트</div>
+                <ul id="refactor-events" class="refactor-events"></ul>
+              </div>
+            </details>
+          </div>
+        </div>
+        <div class="stepper-flow" id="stepper">
+          <div class="step main" data-stage="queued">대기</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="inspecting">입력 검사</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="analyzing">요구사항 분석</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="tooling">툴 실행</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="generating">코드 생성</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="executing">실행</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="finalizing">정리</div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="step main" data-stage="done">완료</div>
+          <!-- 리팩트 브랜치 표시 제거 -->
+        </div>
+        <div class="progress-text">
+          <span id="stage-text" class="stage-text">대기 중</span>
+          <span id="stage-detail" class="muted"></span>
+        </div>
+      </div>
+      <!-- TEMP: tool calls debug panel (remove later) -->
+      <div class="result-group">
+        <div class="label">선택된 툴</div>
+        <div class="muted" id="tool-calls-note"></div>
+        <ul id="tool-calls"></ul>
+      </div>
+      <details class="result-group collapsible">
+        <summary class="label">생성된 코드</summary>
+        <pre id="script"></pre>
+      </details>
+      <div class="result-group">
+        <div class="label">결과 파일</div>
+        <div class="muted" id="downloads-note"></div>
+        <ul id="downloads"></ul>
+      </div>
+      <div class="result-group">
+        <div class="label">오류/메시지</div>
+        <ul id="messages"></ul>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="script.js?v=20260106-1"></script>
+</body>
+
 </html>

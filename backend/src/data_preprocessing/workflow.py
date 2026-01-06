@@ -483,9 +483,9 @@ def run_planned_tools(state: State):
         ),
     }
 
-# generate: 컨텍스트+요청으로 코드 초안 생성
+# generate: 컨텍스트+요청으로 코드 초안 생성 (단일 호출로 최적화)
 def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
-    """코드 생성 LLM 호출."""
+    """코드 생성 LLM 호출 (Structured Output 직접 사용)."""
     context = state.get("context", "")
     user_request = state.get("user_request", "")
     output_formats = state.get("output_formats") or "csv"
@@ -495,7 +495,12 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     requirements_prompt_text = requirements_prompt or requirements_list or "(none)"
     requirement_ids = ", ".join([r.id for r in reqs]) if reqs else "(none)"
 
-    generated_code = llm_coder.invoke(
+    # [Speed Optimization]
+    # 기존: llm.invoke() -> text -> llm_structurer.invoke() -> json (2 Round-trip)
+    # 변경: llm.with_structured_output() -> json (1 Round-trip)
+    
+    code_structurer = llm_coder.with_structured_output(CodeBlocks)
+    code_solution = code_structurer.invoke(
         code_gen_prompt.format_messages(
             context=context,
             user_request=user_request,
@@ -504,8 +509,6 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
             requirement_ids=requirement_ids,
         )
     )
-    code_structurer = llm_gpt.with_structured_output(CodeBlocks)
-    code_solution = code_structurer.invoke(generated_code.content)
 
     messages = [
         (
@@ -719,7 +722,7 @@ def validate(state: State):
 
 # reflect: 실행 오류를 기반으로 수정 코드 재생성
 def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
-    """에러 발생 시 수정 코드 생성 또는 추가 툴 계획."""
+    """에러 발생 시 수정 코드 생성 또는 추가 툴 계획 (Structured Output으로 최적화)"""
     error = extract_last_message_text(state.get("messages", []))
     code_solution = state.get("generation")
     code_solution_str = ""
@@ -741,11 +744,14 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
 
     # 이미 추가 툴을 실행한 직후라면 바로 코드 생성으로 강제
     if state.get("tool_plan_origin") == "reflect":
-        corrected_code = llm_coder.invoke(
+        # [Speed Optimization]
+        # 기존: llm.invoke() -> llm_structurer.invoke()
+        # 변경: llm.with_structured_output(CodeBlocks)
+        code_structurer = llm_coder.with_structured_output(CodeBlocks)
+        reflections = code_structurer.invoke(
             reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
         )
-        code_structurer = llm_gpt.with_structured_output(CodeBlocks)
-        reflections = code_structurer.invoke(corrected_code.content)
+        
         next_generation = {"imports": reflections.imports, "code": reflections.code}
         diff_text, diff_summary = diff_generation(prev_generation, next_generation)
 
@@ -756,6 +762,12 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
             )
         ]
 
+        refact_reason = "Unknown Error"
+        if "REQ-" in str(error) or "__validation_report__" in str(error):
+             refact_reason = "Validation Failure"
+        elif "Traceback" in str(error) or "Error" in str(error):
+             refact_reason = "Script Execution Error"
+        
         return {
             "generation": reflections,
             "messages": messages,
@@ -771,6 +783,8 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
                     "phase": "refactoring",
                     "iterations": int(state.get("iterations", 0) or 0) + 1,
                     "error_input": error,
+                    "refact_reason": refact_reason,
+                    "assist_message_summary": f"Refactoring due to: {refact_reason}",
                     "reflect_action": "generate_code",
                     "generation": {"imports": reflections.imports, "code": reflections.code},
                     "prev_generation": prev_generation,
@@ -780,6 +794,8 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
             ),
         }
 
+    # [Speed Optimization]
+    # planner는 action(generate_code/plan_tools)을 결정
     planner = llm_coder.with_structured_output(ReflectPlanPayload)
     decision = planner.invoke(
         reflect_plan_prompt.format_messages(
@@ -881,7 +897,6 @@ def friendly_error(state: State, llm_gpt: ChatOpenAI):
         trace_payload = {
             "error_source": "context",
             "context": context,
-            "exc_name": exc_name,
             "exc_msg": exc_msg,
         }
     else:
@@ -895,6 +910,8 @@ def friendly_error(state: State, llm_gpt: ChatOpenAI):
             "error_source": "final",
             "raw_error": raw_error,
         }
+    
+    current_iterations = int(state.get("iterations", 0) or 0)
     return _friendly_error_response(
         state,
         llm_gpt,
@@ -902,6 +919,7 @@ def friendly_error(state: State, llm_gpt: ChatOpenAI):
         node_name="friendly_error",
         prompt=prompt,
         trace_payload=trace_payload,
+        iterations=current_iterations,
     )
 
 

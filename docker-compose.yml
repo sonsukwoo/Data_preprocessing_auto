@@ -22,3 +22,9 @@ services:
     ports:
       - "8080:80"
     restart: unless-stopped
+
+  executor:
+    build: ./executor
+    volumes:
+      - ./backend/outputs:/app/outputs
+    restart: unless-stopped

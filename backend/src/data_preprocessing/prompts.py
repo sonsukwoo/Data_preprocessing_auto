@@ -71,6 +71,12 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
 - 문자열 연산 시 혼합 타입을 안전하게 처리하세요(문자열로 변환, null 가드).
 - 컬럼명을 읽은 직후 아래처럼 정규화해 따옴표/공백으로 인한 KeyError를 방지하세요:
   df.columns = [str(c).strip().strip('\"\\'') for c in df.columns]
+
+- [검증 로직 설계 원칙 (Validation Principles)]:
+  1. **현행화된 상태 기준 검증 (State-Awareness)**: 검증 코드는 반드시 **모든 전처리(컬럼명 뒤집기, 타입 변환 등)가 끝난 시점의 DataFrame 상태**를 기준으로 작성하세요. (예: 요구사항에 언급된 컬럼명이 코드 실행 중 변경되었다면, 변경된 이름을 추적하여 검증해야 함)
+  2. **의미적 정합성 우선 (Semantic over Literal)**: 데이터의 '형식(Format)'보다 '의미(Meaning)'가 보존되었는지를 우선하여 검증하세요. 포맷 변경이 불가피한 경우(예: 고정값의 포맷 통일), 의미가 훼손되지 않았다면 융통성 있게 허용하세요.
+  3. **맥락적 오류 판단**: 사소한 포맷 차이나 단순 메타데이터 불일치는 `issues` 리스트보다는 `metrics`에 기록하여, 불필요한 파이프라인 중단을 방지하세요.
+
 - 중요: 스크립트 마지막에 JSON 직렬화 가능한 __validation_report__ dict를 반드시 설정하세요. 최소 포함 항목:
   - ok: bool (모든 핵심 요구사항 충족 시에만 True)
   - issues: list[str] (ok=True면 빈 리스트, ok=False면 실패 사유)

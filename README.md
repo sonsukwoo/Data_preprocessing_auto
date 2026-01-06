@@ -113,18 +113,23 @@ flowchart LR
   G -->|"tool planning (chatbot/reflect)"| TP["run_planned_tools"]
   TP --> TOOL["scan tools"]
   TP -->|"tool_reports"| G
-  G -->|"generate code (incl. reflect fixes)"| P["Python script"]
-  P -->|"write outputs"| O["backend outputs"]
+  G -->|"generate code"| P["Python script (Source)"]
+  
+  %% Executor Integration
+  P -->|"POST /execute"| E["Executor Service (Sandbox)"]
+  E -->|"write outputs"| O["Shared Volume / Outputs"]
+  
   A -->|"downloads + preview"| U
   A -->|"presign + optional download"| S3["S3 bucket"]
   U -->|"presigned upload (optional)"| S3
 ```
 
 S3를 사용하는 경우, **브라우저가 presigned URL로 업로드**하고 FastAPI는 **presign 발급 + 필요 시 S3에서 다운로드/경로 변환**을 수행합니다.
+또한, **Backend는 생성된 코드를 직접 실행하지 않고 `Executor` 서비스로 전달**하여 격리된 환경에서 실행합니다.
 
 ### LangGraph 처리 흐름(핵심)
 
-에이전트는 “입력 검사 → 데이터 샘플링/요약 → 요구사항 정리 + 툴 선택(LLM) → 선택된 툴로 전수 조사 → 코드 생성 → 실행 → 검증”을 수행하고,
+에이전트는 “입력 검사 → 데이터 샘플링/요약 → 요구사항 정리 + 툴 선택(LLM) → 선택된 툴로 전수 조사 → 코드 생성 → **Executor 실행** → 검증”을 수행하고,
 실패하면 `reflect` 노드로 들어가 **최대 N회까지 자동 수정 루프**를 돕습니다.  
 이때 `reflect`가 추가 툴이 필요하다고 판단하면 `run_planned_tools`로 가서 툴을 실행한 뒤 **다시 `reflect`로 복귀**해 수정 코드를 생성합니다.
 
@@ -207,7 +212,7 @@ flowchart TD
 - **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(고정 노드)
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
-- 툴 목록: `collect_unique_values`, `mapping_coverage_report`, `collect_rare_values`, `detect_parseability`, `detect_encoding`, `column_profile`
+- 툴 목록: `collect_unique_values`, `mapping_coverage_report`, `collect_rare_values`, `detect_parseability`, `detect_encoding`, `column_profile`, `value_counts_topk`, `summary_stats`
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성(중간/최종 오류 공통)
 - **generate**: 전처리 파이썬 스크립트 생성
 - **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
@@ -229,7 +234,7 @@ flowchart TD
 5) **전수 조사**: `run_planned_tools`가 선택된 툴을 실행하고 결과를 context에 추가  
    - 현재는 **시간 제한(기본 60초)만 적용**하고, 행 수 제한은 두지 않습니다.  
 6) **코드 생성**: LLM이 “imports + 실행 가능한 스크립트”를 생성 (`backend/src/data_preprocessing/prompts.py`)  
-7) **실행**: 생성된 코드를 서버 프로세스에서 실행하고(stdout 캡처) 결과를 수집  
+7) **실행 (Executor)**: 생성된 코드를 **격리된 Executor 컨테이너**로 전송해 실행하고(stdout 캡처) 결과를 수집  
 8) **검증(가드레일)**: 스크립트는 `__validation_report__`를 반드시 작성해야 하며, 누락/placeholder 남발 등을 탐지해 실패 처리 → `reflect` 루프로 복귀  
 9) **산출물**: 결과 파일을 `backend/outputs/`로 저장하고, `run_id`/`output_files`로 다운로드 링크를 제공  
 10) **내부 기록(Trace)**: 실행 중 생성된 코드/에러/검증/샘플링/전수조사 결과를 모아 `run_<run_id>_internal_trace_내부기록.md`를 함께 생성
@@ -289,3 +294,23 @@ S3 업로드가 실패하면 UI가 자동으로 `POST /upload`(서버 업로드)
 - 샘플링 결과 요약 + 전수 조사(tool_reports)
 
 “블랙박스가 아닌 내부 동작 증빙”에 활용할 수 있습니다.
+
+---
+
+## 보안 및 격리 (Security & Isolation) 🛡️
+
+최근 보안 패치를 통해 데이터 처리의 안전성을 크게 강화했습니다.
+
+### 1. 샌드박스 실행 환경 (Sandboxed Executor)
+- **별도 컨테이너 실행**: LLM이 생성한 파이썬 코드는 Backend 서버가 아닌, **완전히 격리된 `Executor` Docker 컨테이너** 내부에서 실행됩니다.
+- **영향 최소화**: 생성된 코드가 무한 루프에 빠지거나 시스템에 유해한 명령을 실행하더라도, Backend 서비스나 호스트 머신에는 직접적인 영향을 주지 않습니다.
+
+### 2. 파일 시스템 격리 (File System Isolation)
+- **작업 디렉토리 제한 (`workdir`)**:
+  - Backend는 실행 시마다 고유한 `run_id` 기반의 하위 디렉토리를 `workdir`로 지정합니다.
+  - Executor는 오직 허용된 해당 디렉토리 내에서만 파일 읽기/쓰기를 수행하도록 제한되어, **다른 실행 건의 데이터나 시스템 파일에 접근하는 것을 원천 차단**합니다.
+- **경로 탈출 방지**: 상위 디렉토리 점프(`../`) 등의 경로 조작 시도를 방어하는 로직이 적용되어 있습니다.
+
+### 3. 입력값 검증 및 스코프 관리 (Sanitization & Scope)
+- **Strict Scope**: `exec()` 실행 시 전역/지역 변수 스코프를 엄격하게 관리하여, 불필요한 시스템 모듈 접근을 제한합니다.
+- **Type Safety**: 실행 결과로 반환되는 데이터(validation report 등)는 `Safe Serialization` 과정을 거쳐, 실행 불가능한 데이터나 악성 객체가 전달되는 것을 막습니다.

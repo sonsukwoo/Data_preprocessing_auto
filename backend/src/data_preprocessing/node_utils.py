@@ -41,197 +41,18 @@ from .constants import (
 from .models import CodeBlocks, State
 
 
-def _strip_query(path: str) -> str:
-    return path.split("?", 1)[0]
-
-
-def _resolve_path(path: str) -> Path:
-    return Path(_strip_query(path)).expanduser().resolve()
-
-
-def _load_json_payload(path: Path) -> Any:
-    size_mb = path.stat().st_size / (1024 * 1024)
-    if size_mb > _MAX_JSON_FULL_LOAD_MB:
-        raise ValueError(f"JSON file too large for full load ({size_mb:.1f} MB)")
-    with path.open("r", encoding="utf-8-sig") as f:
-        text = f.read().strip()
-    if not text:
-        raise ValueError("Empty JSON content")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        preview = text[:200].replace("\n", "\\n")
-        raise ValueError(f"Invalid JSON content: {exc}. preview={preview!r}") from exc
-
-
-def _detect_text_format(path: Path) -> str:
-    with path.open("rb") as f:
-        raw = f.read(4096)
-    if not raw or not raw.strip():
-        raise ValueError("Empty file content")
-
-    try:
-        sample = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        sample = raw.decode("latin-1", errors="ignore")
-
-    stripped = sample.lstrip()
-    if stripped.startswith("{") or stripped.startswith("["):
-        return "json"
-
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=[",", "\t"])
-        return "tsv" if dialect.delimiter == "\t" else "csv"
-    except Exception:
-        if "\t" in sample and sample.count("\t") >= sample.count(","):
-            return "tsv"
-        return "csv"
-
-
-def _read_arrow_ipc_sample(path: Path, sample_size: int) -> tuple[pd.DataFrame, str]:
-    with path.open("rb") as f:
-        try:
-            reader = ipc.open_file(f)
-            batches: list[pa.RecordBatch] = []
-            total = 0
-            for i in range(reader.num_record_batches):
-                batch = reader.get_batch(i)
-                batches.append(batch)
-                total += batch.num_rows
-                if total >= sample_size:
-                    break
-            table = pa.Table.from_batches(batches).slice(0, sample_size)
-            return table.to_pandas(), "arrow-ipc-file"
-        except pa.ArrowInvalid:
-            f.seek(0)
-            reader = ipc.open_stream(f)
-            batches = []
-            total = 0
-            while total < sample_size:
-                try:
-                    batch = reader.read_next_batch()
-                except StopIteration:
-                    break
-                batches.append(batch)
-                total += batch.num_rows
-            table = pa.Table.from_batches(batches).slice(0, sample_size)
-            return table.to_pandas(), "arrow-ipc-stream"
-
-
-def _read_parquet_sample(path: Path, sample_size: int) -> pd.DataFrame:
-    pf = pq.ParquetFile(path)
-    batches: list[pa.RecordBatch] = []
-    total = 0
-    for batch in pf.iter_batches(batch_size=min(sample_size, 4096)):
-        batches.append(batch)
-        total += batch.num_rows
-        if total >= sample_size:
-            break
-    table = pa.Table.from_batches(batches).slice(0, sample_size)
-    return table.to_pandas()
-
-
-def _read_table_like(path: str, sample_size: int) -> tuple[pd.DataFrame, str]:
-    p = _resolve_path(path)
-    ext = p.suffix.lower()
-
-    if ext == ".parquet":
-        try:
-            return _read_parquet_sample(p, sample_size), "parquet"
-        except Exception:
-            table = pq.read_table(p, use_threads=True)
-            return table.slice(0, sample_size).to_pandas(), "parquet"
-
-    if ext == ".arrow":
-        return _read_arrow_ipc_sample(p, sample_size)
-
-    if ext == ".feather":
-        size_mb = p.stat().st_size / (1024 * 1024)
-        if size_mb > _MAX_FEATHER_MB:
-            raise ValueError(f"Feather file too large ({size_mb:.1f} MB)")
-        return pd.read_feather(p).head(sample_size), "feather"
-
-    if ext in {".xlsx", ".xls"}:
-        try:
-            return pd.read_excel(p, nrows=sample_size), ext.lstrip(".")
-        except Exception:
-            detected = _detect_text_format(p)
-            sep = "\t" if detected == "tsv" else ","
-            return pd.read_csv(p, sep=sep, nrows=sample_size, on_bad_lines="skip"), detected
-
-    if ext in {".json", ".csv", ".tsv"}:
-        detected = _detect_text_format(p)
-        if detected == "json":
-            try:
-                return pd.read_json(p, nrows=sample_size, lines=True, encoding="utf-8-sig"), "json-lines"
-            except Exception:
-                try:
-                    return pd.read_json(p, nrows=sample_size, lines=False, encoding="utf-8-sig"), "json-array"
-                except Exception:
-                    raw = _load_json_payload(p)
-                    if isinstance(raw, list):
-                        return pd.json_normalize(raw)[:sample_size], "json-array-normalized"
-                    return pd.json_normalize([raw])[:sample_size], "json-normalized"
-
-        sep = "\t" if detected == "tsv" else ","
-        try:
-            return pd.read_csv(p, sep=sep, nrows=sample_size, on_bad_lines="skip"), detected
-        except Exception:
-            return pd.read_csv(p, sep=None, engine="python", nrows=sample_size, on_bad_lines="skip"), "csv-auto"
-
-    return pd.read_csv(p, sep=None, engine="python", nrows=sample_size, on_bad_lines="skip"), "csv-fallback"
-
-
-def _pick_candidate_from_dir(root: Path) -> Path | None:
-    candidates: list[Path] = []
-    for f in root.rglob("*"):
-        if not f.is_file():
-            continue
-        if f.name in _HF_METADATA_FILENAMES:
-            continue
-        ext = f.suffix.lower()
-        if ext not in _SUPPORTED_EXTS:
-            continue
-        candidates.append(f)
-
-    candidates.sort(
-        key=lambda f: (
-            _EXT_PRIORITY.get(f.suffix.lower(), 999),
-            0 if "data" in f.parts else 1,
-            len(f.parts),
-        )
-    )
-    return candidates[0] if candidates else None
-
-
-def _build_image_manifest(root: Path, allowed_exts: set[str]) -> pd.DataFrame:
-    rows: list[dict[str, str]] = []
-    for path in root.rglob("*"):
-        if path.is_dir():
-            continue
-        if "__MACOSX" in path.parts:
-            continue
-        if path.name.startswith("._"):
-            continue
-        if path.name == ".DS_Store":
-            continue
-        if path.suffix.lower() not in allowed_exts:
-            continue
-        rows.append(
-            {
-                "filepath": str(path.resolve()),
-                "filename": path.name,
-                "label": path.parent.name,
-            }
-        )
-    if not rows:
-        raise ValueError(f"No image files found under {root} with extensions {sorted(allowed_exts)}")
-    return pd.DataFrame(rows)
-
-
-def _normalize_image_exts(extensions: Sequence[str] | None) -> set[str]:
-    allowed: Iterable[str] = extensions or tuple(e.lstrip(".") for e in sorted(_IMAGE_EXTS))
-    return {f".{ext.lower().lstrip('.')}" for ext in allowed}
+from .io_utils import (
+    _strip_query,
+    _resolve_path,
+    _load_json_payload,
+    _detect_text_format,
+    _read_arrow_ipc_sample,
+    _read_parquet_sample,
+    _read_table_like,
+    _pick_candidate_from_dir,
+    _build_image_manifest,
+    _normalize_image_exts,
+)
 
 
 def _safe_repr(value: object, limit: int = _VALUE_REPR_LIMIT) -> str:
@@ -655,19 +476,22 @@ def _friendly_error_response(
     node_name: str,
     prompt: str,
     trace_payload: dict[str, object],
+    iterations: int | None = None,
 ) -> dict[str, object]:
     resp = llm_gpt.invoke(prompt)
+    if iterations is None:
+        iterations = int(state.get("iterations", 0) or 0)
     return {
         "final_user_messages": [("assistant", resp.content)],
         "error": "yes",
-        "phase": "finalizing",
+        "phase": "error",
         **append_trace(
             state,
             {
                 "ts": now_iso(),
                 "node": node_name,
-                "phase": "finalizing",
-                "iterations": int(state.get("iterations", 0) or 0),
+                "phase": "error",
+                "iterations": iterations,
                 "user_request": user_request,
                 "assistant_message": resp.content,
                 **trace_payload,
