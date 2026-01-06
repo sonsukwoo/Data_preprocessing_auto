@@ -114,10 +114,10 @@ flowchart TD
   D -->|yes| X[friendly_error] --> H[END]
   D -->|no| B[chatbot]
   B --> T[run_planned_tools]
-  T --> E[generate <br/>(Initial Code)]
+  T --> E["generate <br/>(Initial Code)"]
   E --> F[code_check]
   F --> FE{exec_error}
-  FE -->|yes| R[reflect <br/>(Fix Code)]
+  FE -->|yes| R["reflect <br/>(Fix Code)"]
   FE -->|no| G{validate}
   G -->|pass| H
   G -->|fail| R
@@ -153,7 +153,7 @@ flowchart TD
   D4 -->|yes| FE[friendly_error]
   D4 -->|no| C[chatbot]
   C --> TP[run_planned_tools]
-  TP --> G[generate <br/>(Initial)]
+  TP --> G["generate <br/>(Initial)"]
 
   G --> E[code_check]
   E --> D5{exec_ok}
@@ -164,7 +164,7 @@ flowchart TD
   D6 -->|yes| END
   D6 -->|no| D
 
-  D -->|left| RF[reflect <br/>(Fix/Regen)]
+  D -->|left| RF["reflect <br/>(Fix/Regen)"]
   D -->|exceeded| FE
 
   RF --> RT2{need_more_tools}
@@ -184,7 +184,15 @@ flowchart TD
 - **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(고정 노드)
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
-- 툴 목록: `collect_unique_values`, `mapping_coverage_report`, `collect_rare_values`, `detect_parseability`, `detect_encoding`, `column_profile`, `value_counts_topk`, `summary_stats`
+    - **지원 툴 목록**:
+        - `collect_unique_values`: 범주형/명목형 컬럼의 모든 고유값 추출 (오타 방지, 매핑용)
+        - `mapping_coverage_report`: 매핑 작업 시 키 커버리지 분석 (누락/초과값 감지)
+        - `collect_rare_values`: 빈도가 매우 낮은 이상치(Outlier) 또는 희귀값 식별
+        - `value_counts_topk`: 값의 빈도수 상위 K개 및 비율 분석 (데이터 편향 파악)
+        - `summary_stats`: 수치형 데이터의 기초 통계량(평균, 중앙값, 편차 등) 산출
+        - `detect_parseability`: 날짜/숫자 형식 파싱 가능 여부 진단 (파싱 에러 방지)
+        - `detect_encoding`: 파일의 인코딩(euc-kr, utf-8, cp949 등) 자동 감지
+        - `column_profile`: 컬럼 타입, 결측률, 샘플 등을 종합 프로파일링
 - **friendly_error**: 사용자에게 보여줄 오류 메시지 생성(중간/최종 오류 공통)
 - **generate**: 전처리 파이썬 스크립트 생성
 - **code_check**: 생성된 코드 실행 및 stdout/validation_report 수집
