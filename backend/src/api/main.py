@@ -32,7 +32,7 @@ OUTPUT_DIR = ROOT_DIR / "outputs"
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Load .env once on startup so OpenAI API 키가 환경 변수에 적용됨
+# 시작 시 .env를 한 번 로드하여 OpenAI API 키가 환경 변수에 적용되도록 함
 ensure_api_keys(ROOT_DIR / ".env")
 
 app = FastAPI(title="Data Preprocessing Agent API", version="0.1.0")
@@ -520,7 +520,7 @@ class PreviewResponse(BaseModel):
 
 
 def _coerce_jsonable(v: Any) -> Any:
-    # Keep preview payload safe/compact for the browser.
+    # 브라우저 미리보기를 위해 안전하고 간결한 형태로 변환.
     if v is None:
         return None
     if isinstance(v, (bool, int, float, str)):
@@ -541,7 +541,7 @@ def _read_preview_rows(path: Path, n: int) -> tuple[list[str], list[dict[str, An
     elif suffix == ".parquet":
         df = pd.read_parquet(path).head(n)
     elif suffix == ".json":
-        # try jsonl first
+        # jsonl 먼저 시도
         try:
             df = pd.read_json(path, lines=True).head(n)
         except Exception:
@@ -567,7 +567,7 @@ def download_output(run_id: str, filename: str) -> FileResponse:
     created_at, files = info
     ttl = _run_ttl_seconds()
     if (time.time() - created_at) > ttl:
-        # Best-effort cleanup and report expired.
+        # 최선을 다해 정리하고 만료됨을 알림.
         _cleanup_expired_runs(time.time())
         raise HTTPException(status_code=410, detail="결과 파일이 만료되어 삭제되었습니다.")
 
@@ -654,14 +654,14 @@ def _get_s3_bucket() -> str:
 
 def _get_s3_client():
     """
-    Create an S3 client that generates *regional* presigned URLs.
+    *지역(regional)* Presigned URL을 생성하는 S3 클라이언트를 생성합니다.
 
-    If presigned URLs use the global endpoint (bucket.s3.amazonaws.com) for a non-us-east-1 bucket,
-    browsers may hit redirects on preflight (OPTIONS) and fail CORS checks.
+    us-east-1이 아닌 버킷에 대해 전역 엔드포인트(bucket.s3.amazonaws.com)를 사용하면,
+    브라우저가 preflight(OPTIONS) 요청 시 리다이렉트를 만나 CORS 검사에 실패할 수 있습니다.
     """
     region = os.getenv("AWS_REGION", "").strip() or "eu-north-1"
     cfg = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
-    # Force a regional endpoint to avoid redirects during browser preflight.
+    # 브라우저 preflight 중 리다이렉트를 피하기 위해 지역 엔드포인트를 강제합니다.
     return boto3.client(
         "s3",
         region_name=region,
@@ -683,7 +683,7 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
 
 
 def _download_s3_to_upload_dir(s3_uri: str) -> str:
-    """Download an s3://... object or prefix into OUTPUT_DIR/uploads and return the local path."""
+    """s3://... 객체나 접두사(prefix)를 OUTPUT_DIR/uploads로 다운로드하고 로컬 경로를 반환."""
     bucket, key = _parse_s3_uri(s3_uri)
     s3 = _get_s3_client()
 
@@ -727,7 +727,7 @@ def _download_s3_to_upload_dir(s3_uri: str) -> str:
 
 
 def _maybe_download_s3_and_rewrite_question(question: str) -> str:
-    """If question starts with an s3://... path, download it and replace with local path."""
+    """질문이 s3://... 경로로 시작하면 다운로드 후 로컬 경로로 교체."""
     q = question.strip()
     if not q.startswith("s3://"):
         return question
@@ -799,7 +799,7 @@ def presign_put(req: PresignRequest) -> PresignResponse:
 
 
 @app.post("/run", response_model=RunResponse)
-def run(body: RunRequest) -> RunResponse:
+async def run(body: RunRequest) -> RunResponse:
     if not body.question.strip():
         raise HTTPException(status_code=400, detail="question 필드는 비어 있을 수 없습니다.")
 
@@ -808,7 +808,7 @@ def run(body: RunRequest) -> RunResponse:
     llm_model = _normalize_model(body.llm_model, ALLOWED_LLM_MODELS, DEFAULT_LLM_MODEL, "llm_model")
     coder_model = _normalize_model(body.coder_model, ALLOWED_CODER_MODELS, DEFAULT_CODER_MODEL, "coder_model")
     try:
-        result = run_request(
+        result = await run_request(
             request=rewritten_question,
             max_iterations=body.max_iterations,
             output_formats=output_formats,
@@ -816,7 +816,7 @@ def run(body: RunRequest) -> RunResponse:
             coder_model=coder_model,
         )
     except SystemExit as exc:
-        # Generated code may accidentally call exit(); do not crash the API process.
+        # 생성된 코드가 실수로 exit()를 호출할 수 있음; API 프로세스를 강제 종료하지 않음.
         raise HTTPException(status_code=400, detail=f"생성된 코드가 exit()를 호출했습니다: {getattr(exc, 'code', exc)}") from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("그래프 실행 실패")
@@ -833,7 +833,7 @@ def run(body: RunRequest) -> RunResponse:
 
 @app.post("/run_stream")
 def run_stream(body: RunRequest) -> StreamingResponse:
-    """Stream progress as NDJSON. Emits {type:'progress', iterations:n} and a final {type:'final', data:RunResponse}."""
+    """진행 상황을 NDJSON으로 스트리밍. {type:'progress', iterations:n} 및 마지막 {type:'final', data:RunResponse} 방출."""
 
     if not body.question.strip():
         raise HTTPException(status_code=400, detail="question 필드는 비어 있을 수 없습니다.")
@@ -843,7 +843,7 @@ def run_stream(body: RunRequest) -> StreamingResponse:
     llm_model = _normalize_model(body.llm_model, ALLOWED_LLM_MODELS, DEFAULT_LLM_MODEL, "llm_model")
     coder_model = _normalize_model(body.coder_model, ALLOWED_CODER_MODELS, DEFAULT_CODER_MODEL, "coder_model")
 
-    def _iter_ndjson():
+    async def _iter_ndjson():
         graph = build_graph(llm_model=llm_model, coder_model=coder_model, max_iterations=body.max_iterations)
         run_id = uuid4().hex
         initial_state: Dict[str, Any] = {
@@ -884,10 +884,11 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                 "final_friendly_error": ("finalizing", "오류 요약 중"),
             }
 
-            # Use task start events to update stage immediately when a node begins executing.
-            for mode, data in graph.stream(initial_state, stream_mode=["tasks", "values"]):
+            # 태스크 시작 이벤트를 사용하여 노드가 실행을 시작할 때 즉시 단계를 업데이트.
+            async for mode, data in graph.astream(initial_state, stream_mode=["tasks", "values"]):
                 if mode == "tasks" and isinstance(data, dict):
-                    # Task start events include 'input' and 'triggers'. Finish events include 'result'.
+            # Task start events include 'input' and 'triggers'. Finish events include 'result'.
+            # 작업 시작 이벤트에는 'input'과 'triggers'가 포함됨. 종료 이벤트에는 'result'가 포함됨.
                     name = data.get("name")
                     is_start = "input" in data and "triggers" in data
                     if is_start and isinstance(name, str) and name in node_to_stage:
@@ -918,9 +919,14 @@ def run_stream(body: RunRequest) -> StreamingResponse:
                                 detail = "스크립트 오류 수정"
                             elif prev_phase == "validating" or "validation failed" in lower_msg or "requirements" in lower_msg:
                                 detail = "요구사항 검증 오류 수정"
+                            elif prev_phase in ("sampling", "tooling"):
+                                detail = "추가 정보 반영을 위한 추가 툴 호출"
                             else:
                                 detail = "리팩트 중"
-                            detail = f"리팩트 #{reflect_counter}: {detail}" if detail else f"리팩트 #{reflect_counter}"
+                            # detail = f"리팩트 #{reflect_counter}: {detail}" if detail else f"리팩트 #{reflect_counter}"
+                            # 프론트엔드 요청: 리팩트 횟수 prefix 제거
+                            if not detail:
+                                detail = f"리팩트 #{reflect_counter}"
                         if stage != last_stage:
                             last_stage = stage
                             yield json.dumps({"type": "stage", "stage": stage, "detail": detail}, ensure_ascii=False) + "\n"

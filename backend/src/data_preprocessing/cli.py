@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+
 import json
 from pathlib import Path
 
@@ -39,21 +41,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    ensure_api_keys(args.env_file)
-
-    result = run_request(
-        request=args.request,
-        max_iterations=args.max_iterations,
-        llm_model=args.llm_model,
-        coder_model=args.coder_model,
-    )
-
+def _print_result(result: dict) -> None:
     generation = result.get("generation")
     if generation:
-        print("\n[IMPORTS]\n" + generation.imports)
-        print("\n[CODE]\n" + generation.code)
+        print("\n[IMPORTS]\n" + getattr(generation, "imports", ""))
+        print("\n[CODE]\n" + getattr(generation, "code", ""))
     else:
         # friendly_error 경로 등으로 generation이 없을 때 HumanMessage 직렬화가 불가하므로
         # 메시지 내용을 안전하게 출력한다.
@@ -77,6 +69,23 @@ def main() -> None:
         if safe:
             print("\n[RAW RESULT]")
             print(json.dumps(safe, indent=2, ensure_ascii=False))
+
+
+async def _main_async() -> None:
+    args = parse_args()
+    ensure_api_keys(args.env_file)
+
+    result = await run_request(
+        request=args.request,
+        max_iterations=args.max_iterations,
+        llm_model=args.llm_model,
+        coder_model=args.coder_model,
+    )
+    _print_result(result)
+
+
+def main() -> None:
+    asyncio.run(_main_async())
 
 
 if __name__ == "__main__":

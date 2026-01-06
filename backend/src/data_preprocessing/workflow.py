@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Optional
+import operator
+import asyncio
+from typing import Annotated, Any, Literal, TypedDict, Union
 from uuid import uuid4
 
 # =========================
@@ -342,8 +344,10 @@ def chatbot(state: State, llm_gpt: ChatOpenAI):
 
 
 # run_planned_tools: LLM이 선택한 툴을 실행해 컨텍스트 보강
-def run_planned_tools(state: State):
-    """요구사항에서 선택한 툴을 실행해 컨텍스트를 확장."""
+async def run_planned_tools(state: State) -> dict[str, Any]:
+    """
+    [Parallel] Planned Tools 실행 (전수 조사)
+    """
     context = state.get("context") or ""
     planned = state.get("planned_tools") or []
     existing_reports = state.get("tool_reports") or []
@@ -395,6 +399,11 @@ def run_planned_tools(state: State):
         "summary_stats": {"path", "column", "columns", "time_limit_sec"},
     }
 
+    # --- [Parallel Execution Change] ---
+    # 1. Prepare tasks (coroutines)
+    tasks = []
+    task_metadata = []  # To map results back to name/args
+
     for tool_call in planned:
         name, args, reason = _toolcall_parse_entry(tool_call)
         if not name:
@@ -413,48 +422,65 @@ def run_planned_tools(state: State):
 
         tool_fn = tool_map.get(name)
         if tool_fn is None:
-            output = f"ERROR_CONTEXT||UnknownTool||{name}"
-        else:
-            try:
-                output = tool_fn.invoke(args)
-            except Exception as exc:  # noqa: BLE001
-                output = f"ERROR_CONTEXT||{type(exc).__name__}||{exc}"
+            # Handle unknown tool immediately (no async needed)
+            tool_reports.append({
+                "name": name,
+                "args": args,
+                "reason": reason,
+                "output": f"ERROR_CONTEXT||UnknownTool||{name}",
+                "stats": None
+            })
+            continue
 
-        stats: dict[str, Any] | None = None
-        if isinstance(output, str) and not output.startswith("ERROR_CONTEXT||"):
+        # Valid tool -> Schedule for async execution
+        tasks.append(tool_fn.ainvoke(args))
+        task_metadata.append({"name": name, "args": args, "reason": reason})
+
+    # 2. Execute all tasks in parallel
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    else:
+        results = []
+
+    # 3. Process results
+    for i, res in enumerate(results):
+        meta = task_metadata[i]
+        name = meta["name"]
+        args = meta["args"]
+        reason = meta["reason"]
+        
+        output = ""
+        if isinstance(res, Exception):
+            output = f"ERROR_CONTEXT||{type(res).__name__}||{res}"
+        else:
+            output = str(res)
+
+        # Parse stats if possible
+        stats = None
+        if not output.startswith("ERROR_CONTEXT||"):
             try:
                 payload = json.loads(output)
             except Exception:
                 payload = None
             if isinstance(payload, dict):
                 stats = {}
-                for key in (
-                    "rows_scanned",
-                    "time_limited",
-                    "row_limited",
-                    "truncated",
-                    "unique_count",
-                    "missing_in_mapping_count",
-                    "extra_mapping_keys_count",
-                    "rare_count",
-                    "sample_size",
-                    "columns_profiled",
-                    "sample_bytes",
+                for k in (
+                    "rows_scanned", "time_limited", "row_limited", "truncated",
+                    "unique_count", "missing_in_mapping_count", "extra_mapping_keys_count",
+                    "rare_count", "sample_size", "columns_profiled", "sample_bytes",
                 ):
-                    if key in payload:
-                        stats[key] = payload.get(key)
+                    if k in payload:
+                        stats[k] = payload.get(k)
                 if not stats:
                     stats = None
-
-        tool_reports.append(
-            {
-                "name": name,
-                "args": args,
-                "reason": reason,
-                "output": output,
-                "stats": stats,
-            }
-        )
+        
+        tool_reports.append({
+            "name": name,
+            "args": args,
+            "reason": reason,
+            "output": output,
+            "stats": stats,
+        })
 
     context = _toolcall_format_reports(tool_reports, context)
     merged_reports = existing_reports + tool_reports if tool_reports else existing_reports
@@ -1091,7 +1117,7 @@ def build_graph(
 # =========================
 # 엔트리포인트: 그래프 실행 함수
 # =========================
-def run_request(
+async def run_request(
     request: str,
     max_iterations: int = 3,
     llm_model: str = "gpt-4o-mini",
@@ -1126,7 +1152,7 @@ def run_request(
         "sample_json": None,
         "summary_context": None,
     }
-    result = graph.invoke(initial_state)
+    result = await graph.ainvoke(initial_state)
     if isinstance(result, dict):
         trace_name = write_internal_trace_markdown(result)
         if trace_name:
