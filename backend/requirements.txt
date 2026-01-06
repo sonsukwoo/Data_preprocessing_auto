@@ -1,4 +1,4 @@
-langchain-core==1.2.4
+langchain-core==1.2.6
 langchain-openai==1.1.6
 langgraph==1.0.5
 pandas>=2.2.2
