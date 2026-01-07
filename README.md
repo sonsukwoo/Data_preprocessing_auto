@@ -63,7 +63,7 @@
 
 ### 6. 인프라 및 효율성
 *   **홈서버 기반 마이크로서비스**: Ubuntu 기반 홈서버에 백엔드/프론트엔드/Executor를 Docker로 컨테이너화하여 구축, 자원 효율성을 극대화했습니다.
-*   **Zero-Cost 운영**: 퍼블릭 클라우드 대신 유휴 장비를 활용하고, Cloudflare Tunnel을 통해 별도 IP 비용 없이 **안전한 HTTPS 외부 접속** 환경을 구현(운영 비용 $0)했습니다.
+*   **운영**: 퍼블릭 클라우드 대신 유휴 장비를 활용하고, Cloudflare Tunnel을 통해 별도 IP 비용 없이 **안전한 HTTPS 외부 접속** 환경을 구현했습니다.
 
 ### 7. 최신 프레임워크 동기화
 *   **LangChain & LangGraph**: 라이브러리 최신 버전을 적용 하였습니다.
@@ -189,8 +189,8 @@ flowchart TD
 ### 노드별 역할 요약
 - **chatbot**: LLM이 요청 분석, 요구사항 정리, 필요한 툴 선택
 - **inspect_input_node**: 입력 경로 검사 및 포맷/타입 판별
-- **run_sample_and_summarize**: 테이블 샘플링 및 최소 요약(컬럼/타입/결측) 생성(고정 노드)
-- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환(고정 노드)
+- **run_sample_and_summarize**: 테이블 샘플링 및 최소 요약(컬럼/타입/결측) 생성
+- **run_image_manifest**: 이미지 폴더를 CSV 매니페스트로 변환
 - **build_context**: context 확정 및 오류 컨텍스트 설정
 - **run_planned_tools**: 선택된 툴(전수 조사) 실행 후 결과를 context에 추가
     - **지원 툴 목록**:
