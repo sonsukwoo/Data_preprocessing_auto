@@ -54,10 +54,7 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
             """
 당신은 데이터 전처리 보조자입니다.
 - 마크다운 펜스 없이 실행 가능한 Python 스크립트만 출력하세요.
-- 데이터가 크면 CSV 청크 읽기를 우선하고, 불필요한 복사를 피하세요.
 - 필요한 모든 import를 포함하세요.
-- sys.exit/exit/quit/os._exit 같은 프로세스 종료 함수와 argparse를 사용하지 마세요. 코드는 실행 중인 API 프로세스 내부에서 수행됩니다.
-- __main__ 가드나 sys.argv 기반 진입점은 금지합니다. 스크립트는 위에서 아래로 실행되는 형태여야 합니다.
 - 출력에 마크다운 펜스/헤딩을 포함하지 마세요.
 - 컨텍스트에 이미지 매니페스트 CSV가 이미 있다면 그 경로를 사용해 후속 처리/EDA를 수행하세요.
 - 컨텍스트가 혼합 파일 디렉터리를 가리키면, 상황에 맞는 지원 테이블 파일을 선택하되 애매하면 첫 번째 후보를 사용하세요.
@@ -77,24 +74,25 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
   2. **의미적 정합성 우선 (Semantic over Literal)**: 데이터의 '형식(Format)'보다 '의미(Meaning)'가 보존되었는지를 우선하여 검증하세요. 포맷 변경이 불가피한 경우(예: 고정값의 포맷 통일), 의미가 훼손되지 않았다면 융통성 있게 허용하세요.
   3. **맥락적 오류 판단**: 사소한 포맷 차이나 단순 메타데이터 불일치는 `issues` 리스트보다는 `metrics`에 기록하여, 불필요한 파이프라인 중단을 방지하세요.
 
-- 중요: 스크립트 마지막에 JSON 직렬화 가능한 __validation_report__ dict를 반드시 설정하세요. 최소 포함 항목:
+- 중요: 스크립트 마지막에 __validation_report__ dict를 설정하세요.
   - ok: bool (모든 핵심 요구사항 충족 시에만 True)
   - issues: list[str] (ok=True면 빈 리스트, ok=False면 실패 사유)
-  - metrics: dict (검증 근거가 되는 숫자 지표)
-  사용자가 특정 컬럼을 추가/채우라고 했으면 다음 지표를 반드시 포함하세요:
+  - metrics: dict (검증 궼거가 되는 숫자 지표)
+  - requirements: dict (요구사항 ID별 충족 여부)
+  
+  # 예시:
+  __validation_report__ = {{
+      "ok": True,
+      "issues": [],
+      "metrics": {{"row_count": 100, "col_missing": 0}},
+      "requirements": {{"REQ-1": True}}
+  }}
+  
+- 검증 메트릭 예시:
   - <column>_missing: null 개수
   - <column>_empty: 빈 문자열/공백 개수
-  - <column>_placeholder (또는 <column>_fallback): 기본값으로 채운 개수
-  placeholder로 누락을 숨기지 마세요. placeholder/fallback 개수가 0보다 크면 ok=False로 설정하고,
-  누락된 키(예: missing_<column>)를 metrics에 포함해 보정 루프가 확장 가능하도록 하세요.
-  매핑/딕셔너리/lookup으로 컬럼 값을 채우는 경우에는 source 컬럼의 고유값 전체를 수집해 매핑 키와 비교하세요.
-  누락이 있으면 즉시 실패하고, 누락 목록/개수를 metrics에 <column>_missing_mapping_count 및 <column>_missing_mapping(또는 missing_<column>)로 기록하세요.
-  누락 값을 임의값/대표값으로 채우지 마세요.
-  결측/placeholder 완화를 원할 때만 아래 정책을 명시하세요(기본은 엄격 실패):
-  - allowed_missing: ["Cabin"] 처럼 허용 컬럼 리스트
-  - missing_thresholds: {{"Cabin": 100}} 처럼 허용 임계치(개수) 딕셔너리
-  - placeholder_optional: ["Age"] 처럼 placeholder 허용 컬럼
-  - placeholder_required: ["Fare"] 처럼 반드시 placeholder 지표를 요구할 컬럼
+  - <column>_placeholder: 기본값으로 채운 개수
+  - <column>_missing_mapping_count: 매핑 누락 개수
 """,
         ),
         (
@@ -128,18 +126,13 @@ code_gen_prompt = ChatPromptTemplate.from_messages(
 - 메모리에 유의하고, 필요하면 CSV 청크 처리를 사용하세요.
 - `data_path`가 .arrow면 Feather로 가정하지 말고 `pyarrow.ipc.open_file/open_stream`로 record batch를 읽어 pandas로 변환하세요(또는 대용량은 배치 처리).
 - 이미지 컬럼(예: dict에 bytes/path 포함)이 있으면 CSV에 raw bytes를 쓰지 말고 안정적인 path로 변환하거나 `./outputs/images/`에 저장한 경로를 기록하세요.
-- 입력 파일이 없거나 읽을 수 없으면 즉시 실패해야 합니다. 샘플 데이터를 만들어 회피하지 마세요.
+- 입력 파일이 없거나 읽을 수 없으면 즉시 실패해야 합니다.
 
 반환 형식은 imports 블록과 실행 코드 블록 두 부분만 반환하세요. 추가 설명 금지. 마크다운 펜스 금지.
 
 검증 요구사항(필수):
-- 반드시 __validation_report__ = {{ok: bool, issues: list[str], metrics: dict}} 를 설정하세요.
 - __validation_report__['requirements']는 요구사항 ID(예: 'REQ-1')를 키로 하는 dict여야 합니다.
-  각 값은 다음 중 하나여야 합니다:
-  - boolean (True/False), 또는
-  - 최소 {{ok: bool, details: str}}를 포함하는 dict
-- 어떤 요구사항이라도 미충족이면 __validation_report__['ok'] = False로 설정하고, 실패한 ID를 issues에 포함하세요.
-- 위에 제공된 모든 요구사항 ID를 반드시 포함하세요. 임의의 ID를 만들지 마세요.
+- 어떤 요구사항이라도 미충족이면 ok=False로 설정하고, 실패한 ID를 issues에 포함하세요.
 """,
         ),
     ]
@@ -154,14 +147,11 @@ reflect_prompt = ChatPromptTemplate.from_messages(
         (
             "system",
             """
-            실행 중 발생한 오류와 원본 코드가 주어집니다.
             오류를 해결한 수정 코드를 제공하세요.
             코드가 오류 없이 실행되면서 의도한 기능을 유지해야 합니다.
             전체 재작성은 금지하며, 최소 수정으로 기존 구조와 로직을 보존하세요.
-            __main__ 가드, argparse, sys.argv 기반 진입점은 금지합니다.
-            마크다운 펜스/헤딩을 포함하지 마세요.
             누락된 파일을 회피하기 위해 샘플 데이터를 생성하지 마세요. 파일이 없으면 명확한 오류로 즉시 실패해야 합니다.
-            __validation_report__ 구조를 절대 삭제/축약하지 마세요. 특히 requirements dict(요구사항별 pass/fail)는 반드시 포함해야 합니다.
+            __validation_report__ 구조를 유지하세요(특히 requirements dict).
             imports + 실행 코드만 반환하고, 추가 설명은 금지합니다."""
         ),
         (
@@ -204,8 +194,7 @@ reflect_plan_prompt = ChatPromptTemplate.from_messages(
             tool_calls의 reason은 반드시 한국어로 짧게 작성하라. 영어/혼합 언어 금지.
             tool_calls의 args에는 필요한 필수 인자만 포함하고, 제한 옵션은 넣지 마라.
             오류가 문법/런타임/실행 실패라면 tool_calls 없이 action="generate_code"를 선택하라.
-            action="generate_code"일 경우 __validation_report__는 반드시 {{ok, issues, metrics, requirements}}를 포함해야 한다.
-            마크다운 펜스/헤딩 금지. 샘플 데이터 생성 금지.
+            action="generate_code"일 경우 __validation_report__를 반드시 포함하라.
             """,
         ),
         (

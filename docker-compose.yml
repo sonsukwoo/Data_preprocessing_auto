@@ -10,6 +10,7 @@ services:
       S3_BUCKET: ${S3_BUCKET:-}
     volumes:
       - ./backend/outputs:/app/outputs
+      - ./backend/src:/app/src
     ports:
       - "8000:8000"
     restart: unless-stopped

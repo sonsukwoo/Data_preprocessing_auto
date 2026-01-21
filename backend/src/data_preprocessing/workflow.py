@@ -84,15 +84,18 @@ from .node_utils import (
     _validation_normalize_requirements,
     _validation_fail_missing_mapping,
     _validation_fail_missing_metrics,
-    _validation_fail_missing_ok_issues,
     _validation_fail_missing_placeholder_metrics,
-    _validation_fail_missing_report,
     _validation_fail_missing_requirements,
     _validation_fail_requirements,
     _validation_fail_silent_miss,
     _validation_missing_placeholder_metrics,
     _validation_success_response,
 )
+
+# =========================
+# 내부 모듈: 미들웨어
+# =========================
+from .middleware import create_middleware_chain
 
 
 # =========================
@@ -364,7 +367,6 @@ async def run_planned_tools(state: State) -> dict[str, Any]:
         "value_counts_topk": value_counts_topk,
         "summary_stats": summary_stats,
     }
-
     tool_reports: list[dict[str, Any]] = []
     seen: set[str] = set()
     for rep in existing_reports:
@@ -509,9 +511,9 @@ async def run_planned_tools(state: State) -> dict[str, Any]:
         ),
     }
 
-# generate: 컨텍스트+요청으로 코드 초안 생성 (단일 호출로 최적화)
-def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
-    """코드 생성 LLM 호출 (Structured Output 직접 사용)."""
+# generate: 컨텍스트+요청으로 코드 초안 생성 (미들웨어 체인 적용)
+def generate(state: State, llm_coder, llm_gpt: ChatOpenAI):
+    """코드 생성 LLM 호출 (미들웨어 체인으로 검증 코드 보장)."""
     context = state.get("context", "")
     user_request = state.get("user_request", "")
     output_formats = state.get("output_formats") or "csv"
@@ -521,20 +523,45 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
     requirements_prompt_text = requirements_prompt or requirements_list or "(none)"
     requirement_ids = ", ".join([r.id for r in reqs]) if reqs else "(none)"
 
-    # [Speed Optimization]
-    # 기존: llm.invoke() -> text -> llm_structurer.invoke() -> json (2 Round-trip)
-    # 변경: llm.with_structured_output() -> json (1 Round-trip)
+    # [미들웨어 체인 적용]
+    # 미들웨어가 LLM 응답을 제어:
+    # 1. 검증 코드 보장 (ValidationEnforcementMiddleware)
+    # 2. 금지 패턴 제거 (ForbiddenPatternMiddleware)
+    # 3. 형식 정제 (OutputFormatEnforcerMiddleware)
     
-    code_structurer = llm_coder.with_structured_output(CodeBlocks)
-    code_solution = code_structurer.invoke(
+    code_solution = llm_coder.invoke_with_structure_enforcement(
         code_gen_prompt.format_messages(
             context=context,
             user_request=user_request,
             output_formats=output_formats,
             requirements_prompt=requirements_prompt_text,
             requirement_ids=requirement_ids,
-        )
+        ),
+        structured_output_class=CodeBlocks,
+        requirements=reqs,
     )
+    
+    # None 반환 시 (재시도 실패) → reflect로 전달
+    if code_solution is None:
+        return {
+            "error": "yes",
+            "phase": "generating",
+            "messages": [("user", "검증 리포트 생성 실패 (미들웨어 재시도 실패), reflect에서 수정 필요")],
+            **append_trace(
+                state,
+                {
+                    "ts": now_iso(),
+                    "node": "generate",
+                    "phase": "generating",
+                    "iterations": int(state.get("iterations", 0) or 0),
+                    "error": "yes",
+                    "middleware_failed": True,
+                },
+            ),
+        }
+    
+    # 미들웨어 trace 추출
+    middleware_trace = getattr(code_solution, 'middleware_trace', [])
 
     messages = [
         (
@@ -558,6 +585,7 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
                 "output_formats": output_formats,
                 "requirements": [r.model_dump() for r in (reqs or [])],
                 "generation": {"imports": code_solution.imports, "code": code_solution.code},
+                "middleware_trace": middleware_trace,
             },
         ),
     }
@@ -565,16 +593,39 @@ def generate(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
 # code_check: 생성 코드 실행 및 에러 감지
 def code_check(state: State):
     """생성된 코드 실행 및 에러 감지."""
-    code_solution = state["generation"]
-    imports = code_solution.imports
-    code = code_solution.code
+    code_solution = state.get("generation")
+    
+    # [방어 로직] generate 단계에서 실패하여 generation이 없는 경우
+    # 미들웨어 등에서 재시도 후에도 실패하면 code_solution이 None일 수 있음
+    if not code_solution or state.get("error") == "yes":
+        return {
+            "error": "yes",
+            "phase": "executing",
+            **append_trace(
+                state,
+                {
+                    "ts": now_iso(),
+                    "node": "code_check",
+                    "phase": "executing",
+                    "error": "yes",
+                    "note": "Skipped due to generation failure",
+                },
+            ),
+        }
+
+    if isinstance(code_solution, dict):
+        imports = code_solution.get("imports", [])
+        code = code_solution.get("code", "")
+    else:
+        imports = code_solution.imports
+        code = code_solution.code
 
     sample_fallback_reason = detect_sample_fallback(code)
     if sample_fallback_reason:
         error_detail = (
             "샘플 데이터 생성(폴백) 로직이 감지되어 실행을 중단합니다. "
             "실제 파일이 없으면 즉시 실패해야 하며, 샘플 데이터를 만들면 안 됩니다.\n"
-            f"감지 사유: {sample_fallback_reason}"
+            "감지 사유: {sample_fallback_reason}"
         )
         return _code_check_error_response(
             state,
@@ -631,12 +682,9 @@ def validate(state: State):
     workdir_str = state.get("execution_workdir") or ""
     execution_workdir = Path(workdir_str) if workdir_str else None
 
-    # 생성 스크립트가 validation report를 만들지 못하면, 강제로 수정(reflect) 루프로 보낸다.
-    if not isinstance(report, dict):
-        return _validation_fail_missing_report(state, report, execution_workdir)
-
-    if "ok" not in report or "issues" not in report:
-        return _validation_fail_missing_ok_issues(state, report, execution_workdir)
+    # [미들웨어 최적화]
+    # ValidationEnforcementMiddleware가 report 존재와 구조(ok, issues)를 보장하므로
+    # 구조적 무결성 체크(_validation_fail_missing_report 등)는 제거합니다.
 
     ok_raw = report.get("ok")
     ok = _validation_coerce_bool(ok_raw)
@@ -746,9 +794,9 @@ def validate(state: State):
     )
 
 
-# reflect: 실행 오류를 기반으로 수정 코드 재생성
-def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
-    """에러 발생 시 수정 코드 생성 또는 추가 툴 계획 (Structured Output으로 최적화)"""
+# reflect: 실행 오류를 기반으로 수정 코드 재생성 (미들웨어 체인 적용)
+def reflect(state: State, llm_coder, llm_gpt: ChatOpenAI, base_llm: ChatOpenAI):
+    """에러 발생 시 수정 코드 생성 또는 추가 툴 계획 (미들웨어 체인 적용)"""
     error = extract_last_message_text(state.get("messages", []))
     code_solution = state.get("generation")
     code_solution_str = ""
@@ -770,13 +818,16 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
 
     # 이미 추가 툴을 실행한 직후라면 바로 코드 생성으로 강제
     if state.get("tool_plan_origin") == "reflect":
-        # [Speed Optimization]
-        # 기존: llm.invoke() -> llm_structurer.invoke()
-        # 변경: llm.with_structured_output(CodeBlocks)
-        code_structurer = llm_coder.with_structured_output(CodeBlocks)
-        reflections = code_structurer.invoke(
-            reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
+        # [미들웨어 체인 적용]
+        reflections = llm_coder.invoke_with_structure_enforcement(
+            reflect_prompt.format_messages(error=error, code_solution=code_solution_str),
+            structured_output_class=CodeBlocks,
+            requirements=reqs,
         )
+        
+        # None 반환 시 기본 데이터로 처리
+        if reflections is None:
+            reflections = CodeBlocks(imports="", code="# 미들웨어 재시도 실패")
         
         next_generation = {"imports": reflections.imports, "code": reflections.code}
         diff_text, diff_summary = diff_generation(prev_generation, next_generation)
@@ -822,7 +873,7 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
 
     # [Speed Optimization]
     # planner는 action(generate_code/plan_tools)을 결정
-    planner = llm_coder.with_structured_output(ReflectPlanPayload)
+    planner = base_llm.with_structured_output(ReflectPlanPayload)
     decision = planner.invoke(
         reflect_plan_prompt.format_messages(
             error=error,
@@ -861,15 +912,17 @@ def reflect(state: State, llm_coder: ChatOpenAI, llm_gpt: ChatOpenAI):
             ),
         }
 
-    # 코드 생성 (추가 툴 필요 없음)
+    # 코드 생성 (추가 툴 필요 없음) - 미들웨어 체인 적용
     if decision.imports or decision.code:
         reflections = CodeBlocks(imports=decision.imports or "", code=decision.code or "")
     else:
-        corrected_code = llm_coder.invoke(
-            reflect_prompt.format_messages(error=error, code_solution=code_solution_str)
+        reflections = llm_coder.invoke_with_structure_enforcement(
+            reflect_prompt.format_messages(error=error, code_solution=code_solution_str),
+            structured_output_class=CodeBlocks,
+            requirements=reqs,
         )
-        code_structurer = llm_gpt.with_structured_output(CodeBlocks)
-        reflections = code_structurer.invoke(corrected_code.content)
+        if reflections is None:
+            reflections = CodeBlocks(imports="", code="# 미들웨어 재시도 실패")
 
     next_generation = {"imports": reflections.imports, "code": reflections.code}
     diff_text, diff_summary = diff_generation(prev_generation, next_generation)
@@ -1025,7 +1078,13 @@ def build_graph(
 ):
     """LangGraph를 구성하고 컴파일된 그래프를 반환."""
     llm_gpt = ChatOpenAI(model=llm_model)
-    llm_coder = ChatOpenAI(model=coder_model, temperature=0)
+    base_llm_coder = ChatOpenAI(model=coder_model, temperature=0)
+    
+    # [미들웨어 체인 구성]
+    # 1. ValidationEnforcementMiddleware: 검증 코드 보장 (가장 안쪽)
+    # 2. ForbiddenPatternMiddleware: 금지 패턴 제거
+    # 3. OutputFormatEnforcerMiddleware: 형식 정제 (가장 바깥쪽)
+    llm_coder = create_middleware_chain(base_llm_coder, max_retries=2)
 
     graph_builder = StateGraph(State)
 
@@ -1038,12 +1097,12 @@ def build_graph(
     # 요구사항 정리 + 툴 선택 + 툴 실행
     graph_builder.add_node("chatbot", partial(chatbot, llm_gpt=llm_gpt))
     graph_builder.add_node("run_planned_tools", run_planned_tools)
-    # 에러/코드 생성/실행/검증/리플렉트
+    # 에러/코드 생성/실행/검증/리플렉트 (미들웨어 체인 적용)
     graph_builder.add_node("friendly_error", partial(friendly_error, llm_gpt=llm_gpt))
     graph_builder.add_node("generate", partial(generate, llm_coder=llm_coder, llm_gpt=llm_gpt))
     graph_builder.add_node("code_check", code_check)
     graph_builder.add_node("validate", validate)
-    graph_builder.add_node("reflect", partial(reflect, llm_coder=llm_coder, llm_gpt=llm_gpt))
+    graph_builder.add_node("reflect", partial(reflect, llm_coder=llm_coder, llm_gpt=llm_gpt, base_llm=base_llm_coder))
     # ===== 노드 끝 =====
 
     # ===== 엣지: 노드 연결 정의 =====

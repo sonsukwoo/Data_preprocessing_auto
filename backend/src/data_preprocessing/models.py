@@ -15,12 +15,16 @@ class ToolCallArgs(BaseModel):
     mapping_keys: Optional[list[str]] = Field(default=None, description="매핑 키 목록")
     parsers: Optional[list[str]] = Field(default=None, description="파싱 검사 유형 목록")
     top_k: Optional[int] = Field(default=None, description="상위 빈도값 개수")
+
+    model_config = {"extra": "forbid"}
 class ToolCall(BaseModel):
     """LLM이 선택한 데이터 조사 툴 호출."""
 
     name: str = Field(description="Tool name to call")
     args: ToolCallArgs = Field(default_factory=ToolCallArgs, description="Arguments for the tool")
     reason: str = Field(default="", description="툴 선택 이유(짧게, 한국어)")
+
+    model_config = {"extra": "forbid"}
 
 
 class Requirement(BaseModel):
@@ -29,6 +33,8 @@ class Requirement(BaseModel):
     id: str = Field(description="Stable requirement id, e.g. REQ-1")
     text: str = Field(description="Original requirement text (natural language)")
     severity: Literal["must", "should"] = Field(default="must", description="Whether this requirement must pass")
+
+    model_config = {"extra": "forbid"}
 
 
 class RequirementsPayload(BaseModel):
@@ -44,6 +50,8 @@ class RequirementsPayload(BaseModel):
         description="Optional tool calls for data inspection prior to code generation.",
     )
 
+    model_config = {"extra": "forbid"}
+
 
 class ReflectPlanPayload(BaseModel):
     """리플렉트 단계에서 툴 추가 여부/수정 코드 여부를 함께 결정."""
@@ -57,12 +65,30 @@ class ReflectPlanPayload(BaseModel):
     imports: str = Field(default="", description="Imports block (when action=generate_code)")
     code: str = Field(default="", description="Code block (when action=generate_code)")
 
+    model_config = {"extra": "forbid"}
+
+
+class MiddlewareTraceItem(BaseModel):
+    """미들웨어 실행 추적 항목."""
+    middleware: str = Field(description="Middleware name")
+    action: str = Field(description="Action taken")
+    attempt: Optional[int] = Field(default=None, description="Retry attempt number")
+    report_length: Optional[int] = Field(default=None, description="Length of appended report")
+    failed_reason: Optional[str] = Field(default=None, description="Reason for failure")
+
+    model_config = {"extra": "forbid"}
+
 
 class CodeBlocks(BaseModel):
     """LLM이 생성한 코드를 구조화해 담는 모델."""
 
     imports: str = Field(description="Code block import statements")
     code: str = Field(description="Code block not including import statements")
+    middleware_trace: Optional[list[MiddlewareTraceItem]] = Field(
+        default=None, description="Middleware execution trace"
+    )
+
+    model_config = {"extra": "forbid"}
 
 
 class State(MessagesState):
@@ -102,6 +128,7 @@ __all__ = [
     "Requirement",
     "RequirementsPayload",
     "ReflectPlanPayload",
+    "MiddlewareTraceItem",
     "CodeBlocks",
     "State",
 ]
